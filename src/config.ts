@@ -315,6 +315,10 @@ const config = {
    * free connection rather than failing. Ignored when DB_DRIVER=sqlite.
    */
   databasePoolSize: parseNumericEnv('DATABASE_POOL_SIZE', process.env.DATABASE_POOL_SIZE, 10, { min: 1, max: 100, integer: true }),
+  sqliteBusyTimeoutMs: parseNumericEnv('SQLITE_BUSY_TIMEOUT_MS', process.env.SQLITE_BUSY_TIMEOUT_MS, 5000, { min: 1, integer: true }),
+  databaseStatementTimeoutMs: parseNumericEnv('DB_STATEMENT_TIMEOUT_MS', process.env.DB_STATEMENT_TIMEOUT_MS, 25000, { min: 1, integer: true }),
+  databaseQueryTimeoutMs: parseNumericEnv('DB_QUERY_TIMEOUT_MS', process.env.DB_QUERY_TIMEOUT_MS, 30000, { min: 1, integer: true }),
+  databaseIdleTransactionTimeoutMs: parseNumericEnv('DB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS', process.env.DB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS, 60000, { min: 1, integer: true }),
   stellarHealthCheckEnabled: process.env.STELLAR_HEALTH_CHECK !== 'false',
   adminWallet: process.env.ADMIN_WALLET ?? '',
   adminWallets: (process.env.ADMIN_WALLETS ?? process.env.ADMIN_WALLET ?? '').split(',').map(w => w.trim()).filter(w => w.length > 0),

@@ -111,7 +111,11 @@ export async function initDb(): Promise<void> {
       );
     }
 
-    const pgDriver = new PostgresDriver(config.databaseUrl, config.databaseSsl, config.databasePoolSize);
+    const pgDriver = new PostgresDriver(config.databaseUrl, config.databaseSsl, config.databasePoolSize, {
+      statementTimeoutMs: config.databaseStatementTimeoutMs,
+      queryTimeoutMs: config.databaseQueryTimeoutMs,
+      idleInTransactionSessionTimeoutMs: config.databaseIdleTransactionTimeoutMs,
+    });
     await pgDriver.connect();
     _driver = pgDriver;
 
@@ -139,10 +143,10 @@ export async function initDb(): Promise<void> {
     }
     // WAL mode lets readers and a writer proceed concurrently instead of
     // blocking each other on the default rollback journal, and busy_timeout
-    // makes a writer that does contend for the single write lock retry for
-    // up to 5s instead of failing immediately with SQLITE_BUSY.
+    // makes a writer that contends for the single write lock retry for a
+    // bounded, configurable period instead of failing immediately with SQLITE_BUSY.
     sqliteDb.pragma('journal_mode = WAL');
-    sqliteDb.pragma('busy_timeout = 5000');
+    sqliteDb.pragma(`busy_timeout = ${config.sqliteBusyTimeoutMs}`);
     _db = sqliteDb;
     _driver = new SqliteDriver(sqliteDb);
 

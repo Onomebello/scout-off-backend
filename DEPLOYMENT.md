@@ -47,6 +47,10 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `DB_DRIVER` | — | Database driver: `sqlite` (default) or `postgres` |
 | `DB_PATH` | — | SQLite file path (default: `scout-off.db`); only used when `DB_DRIVER=sqlite` |
 | `DATABASE_URL` | — (required when `DB_DRIVER=postgres`) | PostgreSQL connection string, e.g. `postgresql://user:pass@host:5432/db` |
+| `SQLITE_BUSY_TIMEOUT_MS` | — | SQLite lock-contention wait in milliseconds (default: `5000`; SQLite only) |
+| `DB_STATEMENT_TIMEOUT_MS` | — | PostgreSQL server-side statement limit in milliseconds (default: `25000`) |
+| `DB_QUERY_TIMEOUT_MS` | — | PostgreSQL client query limit in milliseconds (default: `30000`) |
+| `DB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS` | — | PostgreSQL idle transaction limit in milliseconds (default: `60000`) |
 | `SSE_KEEPALIVE_INTERVAL_MS` | — | Keep-alive ping interval for SSE connections, in ms (default: `15000`) |
 | `SSE_MAX_CONNECTIONS` | — | Max concurrent SSE connections; `0` = unlimited (default: `0`) |
 | `PORT` | — | API port (default: `4000`) |

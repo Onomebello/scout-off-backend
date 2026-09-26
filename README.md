@@ -801,6 +801,10 @@ Operator topics (secrets rotation, data privacy, Postgres migration, deployment)
 | `DB_PATH`                         | SQLite database file path (default: `scout-off.db`)                                                                   |
 | `DATABASE_URL`                    | PostgreSQL connection URL (required when `DB_DRIVER=postgres`)                                                        |
 | `DATABASE_SSL`                    | PostgreSQL SSL mode: `true`, `no-verify`, or `false` (default: `false`)                                               |
+| `SQLITE_BUSY_TIMEOUT_MS`          | SQLite lock-contention wait before returning `SQLITE_BUSY` (default: `5000`)                                          |
+| `DB_STATEMENT_TIMEOUT_MS`         | PostgreSQL server-side statement timeout in milliseconds (default: `25000`)                                           |
+| `DB_QUERY_TIMEOUT_MS`             | PostgreSQL client query timeout in milliseconds (default: `30000`)                                                    |
+| `DB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS` | PostgreSQL idle-in-transaction timeout in milliseconds (default: `60000`)                               |
 | `LOG_LEVEL`                       | Log verbosity: `debug`, `info`, `warn`, `error` (default: `info`)                                                     |
 | `LOG_SKIP_PATHS`                  | Comma-separated paths to skip in request logging (default: health and metrics probes)                                 |
 | `LOG_SAMPLE_RATE`                 | Sample rate for non-skipped paths (default: `1` = log all)                                                            |
