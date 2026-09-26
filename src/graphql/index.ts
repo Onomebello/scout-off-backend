@@ -16,7 +16,7 @@
 import { createYoga, createSchema } from 'graphql-yoga';
 import { useValidationRule } from '@envelop/core';
 import { Application, Request, Response, NextFunction } from 'express';
-import { GraphQLError, Kind } from 'graphql';
+import { GraphQLError, visit } from 'graphql';
 import { optionalAuth } from '../middleware/auth';
 import { rateLimit, walletRateLimit } from '../middleware/rateLimit';
 import { isEnabled, GRAPHQL_ENABLED } from '../services/featureFlags';
@@ -36,29 +36,32 @@ import { logger } from '../utils/logger';
  * circuit execution before any resolver runs — the cleanest approach for this
  * version of graphql-yoga that doesn't require an external depth-limit package.
  */
-function createBlockIntrospectionPlugin() {
+export function createBlockIntrospectionPlugin() {
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     onExecute({ args, setResultAndStopExecution }: any) {
-      const defs: readonly import('graphql').DefinitionNode[] =
-        args?.document?.definitions ?? [];
-      for (const def of defs) {
-        if (def.kind !== Kind.OPERATION_DEFINITION) continue;
-        for (const sel of def.selectionSet.selections) {
-          if (
-            sel.kind === Kind.FIELD &&
-            (sel.name.value === '__schema' || sel.name.value === '__type')
-          ) {
-            setResultAndStopExecution({
-              errors: [
-                new GraphQLError('GraphQL introspection is disabled in production.', {
-                  extensions: { code: 'INTROSPECTION_DISABLED' },
-                }),
-              ],
-            });
-            return;
+      const document = args?.document;
+      if (!document) return;
+
+      let containsIntrospection = false;
+      visit(document, {
+        Field(node) {
+          if (node.name.value === '__schema' || node.name.value === '__type') {
+            containsIntrospection = true;
+            return false;
           }
-        }
+          return undefined;
+        },
+      });
+
+      if (containsIntrospection) {
+        setResultAndStopExecution({
+          errors: [
+            new GraphQLError('GraphQL introspection is disabled in production.', {
+              extensions: { code: 'INTROSPECTION_DISABLED' },
+            }),
+          ],
+        });
       }
     },
   };
