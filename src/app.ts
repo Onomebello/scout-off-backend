@@ -205,7 +205,9 @@ const defaultJsonParser = express.json({ limit: config.bodyLimit.json });
 
 const UPLOAD_PATHS = new Set([
   '/api/players/register', '/api/v1/players/register',
+  '/api/v2/players/register',
   '/api/validators/milestone', '/api/v1/validators/milestone',
+  '/api/v2/validators/milestone',
 ]);
 const AUTH_PATHS = new Set(['/auth/token', '/auth/challenge']);
 

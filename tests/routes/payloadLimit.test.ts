@@ -31,6 +31,33 @@ describe('JSON Payload Size Limit', () => {
     expect(res.status).not.toBe(413);
   });
 
+  it('accepts a 5 MB body on /api/v2/players/register (upload limit 10 MB)', async () => {
+    const payload = {
+      wallet: 'G'.repeat(56),
+      data: 'x'.repeat(5 * 1024 * 1024),
+    };
+
+    const res = await request(app)
+      .post('/api/v2/players/register')
+      .send(payload);
+
+    expect(res.status).not.toBe(413);
+  });
+
+  it('accepts a 5 MB body on /api/v2/validators/milestone (upload limit 10 MB)', async () => {
+    const payload = {
+      playerId: 'player-1',
+      milestoneType: 'performance',
+      description: 'x'.repeat(5 * 1024 * 1024),
+    };
+
+    const res = await request(app)
+      .post('/api/v2/validators/milestone')
+      .send(payload);
+
+    expect(res.status).not.toBe(413);
+  });
+
   it('rejects a 2 KB body on /auth/token (auth limit 1 KB)', async () => {
     const oversizedPayload = {
       data: 'x'.repeat(2 * 1024),
