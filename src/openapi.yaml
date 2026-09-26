@@ -1790,8 +1790,10 @@ paths:
                        When omitted no additional player-level filtering is applied.
 
         Filtering: only events relevant to the authenticated wallet are sent (wallet
-        isolation is always enforced regardless of query params).  The optional
-        query params add further narrowing on top.
+        isolation is always enforced regardless of query params). Player events are
+        matched through the authenticated wallet's player record, since their payload
+        carries a player ID rather than a wallet address. Optional query params add
+        further narrowing on top.
 
         SSE event types sent:
           - milestone_approved  (player: their own milestone approvals)
@@ -1809,11 +1811,14 @@ paths:
             no further protected events are delivered.
           - If the wallet is blocklisted while the stream is open, the same
             termination happens with reason "wallet_blocklisted".
+          - When the access JWT expires, the stream closes with reason "token_expired".
           - Detection bound: immediate for revocations/blocklists processed in
             this process; ≤ SSE_AUTH_SWEEP_INTERVAL_MS (default 30 s) for changes
             persisted by another instance (one sweep query per process, never a
             DB query per keep-alive tick).
           - Blocklisted wallets cannot open a new connection (403).
+          - Concurrent streams are limited per wallet by
+            SSE_MAX_CONNECTIONS_PER_WALLET (default 5; 0 = unlimited).
 
         Keep-alive: a `: ping` comment is sent every SSE_KEEPALIVE_INTERVAL_MS ms
         (default 15 s) to prevent idle-connection timeouts.
@@ -1824,8 +1829,10 @@ paths:
           description: '{ success: false, error: string } — missing or invalid token'
         '403':
           description: '{ success: false, error: string } — wallet is blocklisted'
+        '429':
+          description: '{ success: false, error: string } — per-wallet connection limit reached'
         '503':
-          description: '{ success: false, error: string } — connection limit reached'
+          description: '{ success: false, error: string } — global connection limit reached'
       security:
         - bearerAuth: []
   /players:

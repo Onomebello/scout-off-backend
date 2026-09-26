@@ -512,6 +512,9 @@ blocklisted wallets lose access immediately:
 - **Wallet blocklisting** — if the authenticated wallet is blocklisted, the
   connection emits `session_ended` with `reason: "wallet_blocklisted"` and
   closes. Blocklisted wallets also cannot open a new stream (`403`).
+- **JWT expiry** — the stream emits `session_ended` with
+  `reason: "token_expired"` and closes when the access token expires. Clients
+  must reconnect using a fresh access token.
 
 ### Detection bound
 
