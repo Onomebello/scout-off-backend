@@ -52,8 +52,11 @@ code that ignores unknown keys. Subscribers that validate the payload shape
 (e.g. strict JSON Schema validation) must update their schema to accept the
 new field.
 
-Delivery uses exponential backoff (3 attempts by default: 500ms, then 1000ms
-between attempts) via `postWebhookWithRetry` in `src/services/webhooks.ts`.
+Delivery uses full-jitter exponential backoff (3 attempts by default, with
+backoff caps of 500ms and 1000ms) via `postWebhookWithRetry` in
+`src/services/webhooks.ts`. `429` and `503` responses honor a valid
+`Retry-After` header (delta-seconds or HTTP date), and response bodies are
+drained before retrying.
 Each individual attempt is bounded by `WEBHOOK_TIMEOUT_MS` (default: 10s) — a
 subscriber that accepts the connection but never responds is aborted and the
 attempt treated as a failure, rather than hanging indefinitely (#691).

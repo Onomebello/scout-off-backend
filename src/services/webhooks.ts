@@ -61,9 +61,24 @@ export function signWebhookPayload(rawBody: string, secret: string, timestamp: s
   return `sha256=${digest}`;
 }
 
+function parseRetryAfter(response: Awaited<ReturnType<typeof fetch>>): number | null {
+  const retryAfter = response.headers.get('retry-after');
+  if (retryAfter === null) return null;
+
+  const value = retryAfter.trim();
+  if (/^\d+$/.test(value)) {
+    return Math.min(Number(value) * 1000, 2_147_483_647);
+  }
+
+  const retryAt = Date.parse(value);
+  return Number.isNaN(retryAt)
+    ? null
+    : Math.min(Math.max(0, retryAt - Date.now()), 2_147_483_647);
+}
+
 /**
  * Executes a webhook POST with retry logic.
- * Uses exponential backoff between attempts to reduce pressure on transient failures.
+ * Uses full-jitter exponential backoff between attempts to avoid synchronized retries.
  * When `options.secret` is provided, signs the raw request body and attaches it as
  * the `X-Webhook-Signature` header.
  */
@@ -88,6 +103,7 @@ export async function postWebhookWithRetry(
       span.setAttribute('webhook.attempt', attempt);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
+      let retryAfterMs: number | null = null;
       try {
         const requestHeaders = { ...headers };
         if (options.secret) {
@@ -108,9 +124,14 @@ export async function postWebhookWithRetry(
 
         if (!response.ok) {
           span.setAttribute('webhook.status', response.status);
+          if (response.status === 429 || response.status === 503) {
+            retryAfterMs = parseRetryAfter(response);
+          }
+          response.body?.resume();
           throw new Error(`Webhook dispatch failed with status ${response.status}`);
         }
         span.setAttribute('webhook.status', response.status);
+        response.body?.resume();
         return;
       } catch (err) {
         lastError = controller.signal.aborted
@@ -121,7 +142,9 @@ export async function postWebhookWithRetry(
       }
 
       if (attempt < retries) {
-        const delayMs = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
+        const backoffCapMs = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
+        const delayMs =
+          retryAfterMs ?? Math.floor(Math.random() * (backoffCapMs + 1));
         await sleep(delayMs);
       }
     }

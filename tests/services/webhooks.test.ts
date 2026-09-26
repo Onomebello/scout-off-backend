@@ -36,6 +36,64 @@ describe('postWebhookWithRetry', () => {
     expect(mockedFetch).toHaveBeenCalledTimes(2);
   });
 
+  it('applies full jitter to exponential backoff delays', async () => {
+    jest.useFakeTimers();
+    const random = jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      mockedFetch.mockRejectedValueOnce(new Error('network fail'));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFetch.mockResolvedValueOnce({ ok: true, status: 200 } as any);
+
+      const delivery = postWebhookWithRetry(
+        'https://example.com',
+        { eventType: 'test' },
+        { retries: 2, baseDelayMs: 100, maxDelayMs: 100 },
+      );
+      await jest.advanceTimersByTimeAsync(49);
+      expect(mockedFetch).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(delivery).resolves.toBeUndefined();
+      expect(mockedFetch).toHaveBeenCalledTimes(2);
+    } finally {
+      random.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('uses Retry-After for 429/503 responses and drains failed response bodies', async () => {
+    jest.useFakeTimers();
+    try {
+      const body = { resume: jest.fn() };
+      mockedFetch
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: { get: () => '2' },
+          body,
+        } as any)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValueOnce({ ok: true, status: 200 } as any);
+
+      const delivery = postWebhookWithRetry(
+        'https://example.com',
+        { eventType: 'test' },
+        { retries: 2, baseDelayMs: 1, maxDelayMs: 1 },
+      );
+
+      await jest.advanceTimersByTimeAsync(1999);
+      expect(mockedFetch).toHaveBeenCalledTimes(1);
+      expect(body.resume).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(delivery).resolves.toBeUndefined();
+      expect(mockedFetch).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('throws after all retries fail', async () => {
     mockedFetch.mockRejectedValue(new Error('network down'));
 
