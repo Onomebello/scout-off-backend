@@ -232,6 +232,23 @@ describe('EventBroadcaster', () => {
     expect(inst.subscriberCount).toBe(0);
   });
 
+  it('counts active subscribers by authenticated wallet', () => {
+    const inst = EventBroadcaster.getInstance();
+    const subA = makeSub(WALLET_A);
+    const subA2 = makeSub(WALLET_A);
+    const subB = makeSub(WALLET_B);
+    inst.subscribe(subA);
+    inst.subscribe(subA2);
+    inst.subscribe(subB);
+
+    expect(inst.getSubscriberCountForWallet(WALLET_A)).toBe(2);
+    expect(inst.getSubscriberCountForWallet(WALLET_B)).toBe(1);
+
+    inst.unsubscribe(subA);
+    inst.unsubscribe(subA2);
+    inst.unsubscribe(subB);
+  });
+
   it('delivers a relevant event to a subscriber', () => {
     const inst = EventBroadcaster.getInstance();
     const sub = makeSub(WALLET_A, PLAYER_1);

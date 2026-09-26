@@ -50,6 +50,35 @@ function getMaxSseConnections(): number {
   return parseInt(process.env.SSE_MAX_CONNECTIONS ?? '0', 10);
 }
 
+/** Maximum concurrent streams per authenticated wallet (0 = unlimited). */
+function getMaxSseConnectionsPerWallet(): number {
+  const configured = Number.parseInt(process.env.SSE_MAX_CONNECTIONS_PER_WALLET ?? '5', 10);
+  return Number.isInteger(configured) && configured >= 0 ? configured : 5;
+}
+
+/** Reject a stream when either the process-wide or per-wallet cap is reached. */
+function rejectAtConnectionLimit(wallet: string, res: Response): boolean {
+  const maxSseConnections = getMaxSseConnections();
+  if (maxSseConnections > 0 && broadcaster.subscriberCount >= maxSseConnections) {
+    res.status(503).json({
+      success: false,
+      error: 'SSE connection limit reached. Please try again later.',
+    });
+    return true;
+  }
+
+  const maxPerWallet = getMaxSseConnectionsPerWallet();
+  if (maxPerWallet > 0 && broadcaster.getSubscriberCountForWallet(wallet) >= maxPerWallet) {
+    res.status(429).json({
+      success: false,
+      error: 'SSE connection limit for this account reached. Please try again later.',
+    });
+    return true;
+  }
+
+  return false;
+}
+
 // ─── Valid event type set (for query param validation) ────────────────────────
 
 const VALID_EVENT_TYPES = new Set<ContractEventType>([
@@ -93,7 +122,7 @@ interface ActiveSession {
   jti: string | undefined;
   subscriber: SseSubscriber;
   /** Terminate the connection; safe to call more than once. */
-  terminate: (reason: 'token_revoked' | 'wallet_blocklisted') => void;
+  terminate: (reason: 'token_revoked' | 'wallet_blocklisted' | 'token_expired') => void;
 }
 
 /** Sessions currently open in this process. */
@@ -170,11 +199,14 @@ let authSweepTimer: NodeJS.Timeout | null = null;
  *     no further protected events are delivered.
  *   - If the wallet is blocklisted while the stream is open, the same
  *     termination happens with reason "wallet_blocklisted".
+ *   - When the access JWT expires, the stream closes with reason "token_expired".
  *   - Detection bound: immediate for revocations/blocklists processed in
  *     this process; ≤ SSE_AUTH_SWEEP_INTERVAL_MS (default 30 s) for changes
  *     persisted by another instance (one sweep query per process, never a
  *     DB query per keep-alive tick).
  *   - Blocklisted wallets cannot open a new connection (403).
+ *   - Concurrent streams are limited per wallet by
+ *     SSE_MAX_CONNECTIONS_PER_WALLET (default 5; 0 = unlimited).
  *
  * Keep-alive: a `: ping` comment is sent every SSE_KEEPALIVE_INTERVAL_MS ms
  * (default 15 s) to prevent idle-connection timeouts.
@@ -183,7 +215,8 @@ let authSweepTimer: NodeJS.Timeout | null = null;
  * @response 200 text/event-stream — long-lived SSE connection
  * @response 401 { success: false, error: string } — missing or invalid token
  * @response 403 { success: false, error: string } — wallet is blocklisted
- * @response 503 { success: false, error: string } — connection limit reached
+ * @response 429 { success: false, error: string } — per-wallet connection limit reached
+ * @response 503 { success: false, error: string } — global connection limit reached
  */
 router.get('/stream', requireAuth, async (req: Request, res: Response) => {
   const wallet = req.account!;
@@ -199,18 +232,15 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
   }
 
   // ── Connection limit guard ─────────────────────────────────────────────────
-  const maxSseConnections = getMaxSseConnections();
-  if (maxSseConnections > 0 && broadcaster.subscriberCount >= maxSseConnections) {
-    res.status(503).json({
-      success: false,
-      error: 'SSE connection limit reached. Please try again later.',
-    });
-    return;
-  }
+  if (rejectAtConnectionLimit(wallet, res)) return;
 
   // Resolve the player's cuid2 once per connection; contract events carry the
   // player ID, while authentication identifies the owner by wallet.
   const player = await getPlayerByWallet(wallet);
+
+  // Re-check after the async lookup to prevent simultaneous requests from
+  // passing the cap before either one has registered as a subscriber.
+  if (rejectAtConnectionLimit(wallet, res)) return;
 
   // ── Parse optional filter query params ────────────────────────────────────
   const rawEventType = req.query.eventType as string | undefined;
@@ -246,6 +276,7 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
   let terminated = false;
   const cleanupFns: Array<() => void> = [];
   let keepAliveTimer: NodeJS.Timeout | null = null;
+  let tokenExpiryTimer: NodeJS.Timeout | null = null;
 
   const subscriber: SseSubscriber = {
     wallet,
@@ -266,6 +297,7 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
     if (terminated) return;
     terminated = true;
     if (keepAliveTimer) clearInterval(keepAliveTimer);
+    if (tokenExpiryTimer) clearTimeout(tokenExpiryTimer);
     broadcaster.unsubscribe(subscriber);
     activeSessions.delete(session);
     for (const fn of cleanupFns) {
@@ -275,7 +307,7 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
     logger.info(`[sse] client disconnected wallet=${wallet} total=${broadcaster.subscriberCount}`);
   };
 
-  const terminate = (reason: 'token_revoked' | 'wallet_blocklisted'): void => {
+  const terminate = (reason: 'token_revoked' | 'wallet_blocklisted' | 'token_expired'): void => {
     if (terminated || res.writableEnded) return;
     logger.warn(`[sse] terminating session wallet=${wallet} reason=${reason}`);
     try {
@@ -331,6 +363,21 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
     req.removeListener('close', onClose);
     req.removeListener('aborted', onClose);
   });
+
+  // End the stream at the JWT's own expiry rather than allowing the initial
+  // authentication decision to authorize an unbounded connection.
+  if (req.tokenExpiresAt !== undefined) {
+    const tokenExpiresAtMs = req.tokenExpiresAt * 1000;
+    const enforceExpiry = (): void => {
+      const remainingMs = tokenExpiresAtMs - Date.now();
+      if (remainingMs <= 0) {
+        session.terminate('token_expired');
+        return;
+      }
+      tokenExpiryTimer = setTimeout(enforceExpiry, Math.min(remainingMs, 2_147_483_647));
+    };
+    enforceExpiry();
+  }
 
   // Start the shared sweep timer once the first connection opens.
   if (!authSweepTimer) {

@@ -202,6 +202,15 @@ export class EventBroadcaster extends EventEmitter {
     return this._subscribers.size;
   }
 
+  /** Number of currently connected subscribers authenticated as this wallet. */
+  getSubscriberCountForWallet(wallet: string): number {
+    let count = 0;
+    for (const subscriber of this._subscribers) {
+      if (subscriber.wallet === wallet) count += 1;
+    }
+    return count;
+  }
+
   /**
    * Register an SSE subscriber. The subscriber's `send` callback will be
    * invoked for every event that passes:
