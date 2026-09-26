@@ -41,6 +41,7 @@ Response codes:
 | Status | Meaning                                                                 |
 | ------ | ----------------------------------------------------------------------- |
 | `200`  | Stream opened; frames start arriving                                    |
+| `400`  | Invalid `eventType` filter (`{ success: false, error, code: "VALIDATION_ERROR", validEventTypes }`) |
 | `401`  | Missing or invalid token (`{ success: false, error }`)                  |
 | `403`  | Wallet is blocklisted — stream access revoked                           |
 | `503`  | Connection limit reached (`SSE_MAX_CONNECTIONS`) — retry later          |
@@ -94,7 +95,7 @@ further on top of it.
 
 | Parameter   | Type   | Behaviour                                                                                                                              |
 | ----------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `eventType` | string | Subscribe to a single event type, e.g. `?eventType=milestone_approved`. Omitted = receive all event types that pass the relevance filter. Unknown values are ignored. |
+| `eventType` | string | Subscribe to one or more event types as a comma-separated list, e.g. `?eventType=milestone_approved,contact_unlocked`. Omitted = receive all event types that pass the relevance filter. Unknown values are rejected with `400`. |
 | `playerId`  | string | Only deliver events whose payload contains this player identifier. Omitted = no additional player-level narrowing.                       |
 
 Examples:
@@ -102,6 +103,9 @@ Examples:
 ```text
 # Only my milestone approvals
 GET /api/events/stream?eventType=milestone_approved
+
+# Multiple types (comma-separated)
+GET /api/events/stream?eventType=milestone_approved,contact_unlocked
 
 # Only events about one player (any type)
 GET /api/events/stream?playerId=player-001
@@ -123,8 +127,30 @@ Filterable `eventType` values (validated against this exact list):
 > **Note:** the stream can also carry `player_deactivated`, `player_reactivated`,
 > `trial_offer_accepted`, and `trial_offer_rejected` frames (they pass the
 > relevance filter), but those types are **not** currently accepted as
-> `eventType` filter values — an unknown filter value is silently ignored, so a
-> filter for them behaves like no filter at all.
+> `eventType` filter values — requesting one returns `400` with the list of
+> valid types in `validEventTypes`.
+
+### Invalid `eventType`
+
+If any requested value is not in the valid list above, the request is rejected
+with `400` **before** the stream opens:
+
+```json
+{
+  "success": false,
+  "error": "Unknown eventType: 'milestone_aproved'",
+  "code": "VALIDATION_ERROR",
+  "validEventTypes": [
+    "player_registered",
+    "milestone_submitted",
+    "milestone_approved",
+    "scout_subscribed",
+    "contact_unlocked",
+    "trial_offer_logged",
+    "fees_withdrawn"
+  ]
+}
+```
 
 ## Frame format
 
@@ -184,68 +210,4 @@ self-documenting and future-proof.
 The two filter layers compose with **AND** semantics:
 
 1. `isEventRelevantToWallet` — wallet isolation, always enforced.
-2. `isEventMatchingFilter` — the optional `eventType` / `playerId` narrowing.
-
-A `playerId` filter matches if any payload field that carries a player identity
-(`player_id`, `wallet`, `scout`, `recipient`, `validator`) equals the value.
-With no filter at all, the client receives every event that passes the
-relevance check (wildcard behaviour).
-
-## Keep-alive and compression
-
-- **Keep-alive:** a `: ping` comment frame is written every
-  `SSE_KEEPALIVE_INTERVAL_MS` (default `15000` ms) so proxies and load balancers
-  don't time out idle connections. The comment is ignored by `EventSource`.
-- **Compression:** gzip/br compression is **disabled** for the SSE paths
-  (`/api/events/stream`, `/api/v1/events/stream`, `/api/v2/events/stream`) —
-  SSE responses are written incrementally and compression would buffer them.
-- **Connection limit:** `SSE_MAX_CONNECTIONS` caps concurrent streams
-  (default `0` = unlimited). Exceeding it returns `503`.
-
-## Reconnection and replay behaviour (known limitations)
-
-- There is **no `id:` field in event frames and no `Last-Event-ID` replay**.
-  If the connection drops, the server does not buffer missed events and cannot
-  resume the stream from a client-supplied offset.
-- When a client reconnects it simply opens a **fresh stream from "now"** —
-  events indexed while the client was disconnected are not replayed.
-- Therefore a reconnecting client must rebuild any state it might have missed
-  from the REST API (e.g. `GET /api/players/:playerId/milestones`,
-  `GET /api/admin/events`, or the webhook archive) rather than relying on the
-  stream for backfill.
-
-## Live authorization enforcement
-
-Once a stream is open, authorization is re-checked continuously (issue #1019):
-
-- If the JWT is revoked (`POST /auth/logout` or admin token revocation), the
-  server sends a terminal `session_ended` frame with reason `token_revoked` and
-  closes the connection.
-- If the wallet is blocklisted, the same happens with reason
-  `wallet_blocklisted`.
-- Detection is immediate for revocations/blocklists processed in the same
-  process, and within `SSE_AUTH_SWEEP_INTERVAL_MS` (default 30 s) for changes
-  persisted by another backend instance. A blocklisted wallet also cannot open
-  a new connection (403).
-
-See [docs/auth.md § SSE live revocation & wallet blocklisting](auth.md#sse-live-revocation--wallet-blocklisting-1019)
-for the full model.
-
-## Related configuration
-
-| Variable                    | Default | Description                                             |
-| --------------------------- | ------- | ------------------------------------------------------- |
-| `SSE_KEEPALIVE_INTERVAL_MS` | `15000` | Interval between keep-alive `: ping` comments (ms)      |
-| `SSE_MAX_CONNECTIONS`       | `0`     | Max concurrent streams; `0` = unlimited                 |
-| `SSE_AUTH_SWEEP_INTERVAL_MS`| `30000` | Cross-process auth sweep interval (ms)                  |
-
-## Troubleshooting
-
-| Symptom                                  | Likely cause / check                                                        |
-| ---------------------------------------- | --------------------------------------------------------------------------- |
-| `401` on connect                         | Missing/expired `Authorization: Bearer` header                              |
-| `403` on connect                         | Wallet is blocklisted                                                       |
-| `503` on connect                         | `SSE_MAX_CONNECTIONS` reached — raise it or check for leaked connections     |
-| Stream opens but no events arrive        | Filter too narrow, or the events simply aren't relevant to your wallet      |
-| Events missed after a reconnect          | Expected — there is no `Last-Event-ID` replay; re-fetch state from REST      |
-| Keep-alives stop and connection dies     | Proxy buffering — ensure `X-Accel-Buffering: no` is honoured (set by the backend) |
+2. `isEventMatchingFilter` — the optional `eventType`
