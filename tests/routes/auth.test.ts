@@ -94,7 +94,7 @@ describe('POST /auth/token — admin role pre-verification regression (#694)', (
     // Construct a transaction XDR whose first operation's source is an admin wallet,
     // but which is NOT signed by that wallet.  Without the fix this could (in a
     // fragile code path) return a token before signature verification runs.
-    // With the fix, role determination only happens from verifyAndIssueToken()'s
+    // With the fix, role determination only happens from verifyChallenge()'s
     // verified account — so any signature failure produces a 401, not an admin token.
     const malformedXdr = 'AAAAAQAAAAAAAAAA'; // short / invalid XDR
     const res = await request(app)

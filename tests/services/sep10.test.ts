@@ -1,4 +1,4 @@
-import { buildChallenge, verifyAndIssueToken } from '../../src/services/sep10';
+import { buildChallenge, verifyChallenge } from '../../src/services/sep10';
 import crypto from 'crypto';
 import { Keypair, Transaction, Networks, TransactionBuilder, BASE_FEE, Operation, Account, Asset } from '@stellar/stellar-sdk';
 
@@ -11,23 +11,21 @@ describe('sep10', () => {
     expect(xdr.length).toBeGreaterThan(0);
   });
 
-  it('verifyAndIssueToken issues a JWT after client signs the challenge', () => {
+  it('verifyChallenge returns the account after client signs the challenge', () => {
     const xdr = buildChallenge(clientKeypair.publicKey());
     const tx = new Transaction(xdr, Networks.TESTNET);
     tx.sign(clientKeypair);
     const signedXdr = tx.toXdr();
 
-    const { token, account } = verifyAndIssueToken(signedXdr);
-    expect(typeof token).toBe('string');
-    expect(account).toBe(clientKeypair.publicKey());
+    expect(verifyChallenge(signedXdr)).toEqual({ account: clientKeypair.publicKey() });
   });
 
-  it('verifyAndIssueToken throws on unsigned challenge', () => {
+  it('verifyChallenge throws on unsigned challenge', () => {
     const xdr = buildChallenge(clientKeypair.publicKey());
-    expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge signature');
+    expect(() => verifyChallenge(xdr)).toThrow('Invalid challenge signature');
   });
 
-  it('verifyAndIssueToken throws when server signature is absent', () => {
+  it('verifyChallenge throws when server signature is absent', () => {
     // Build a valid-looking challenge from a rogue server (not our SERVER_KEYPAIR)
     const rogueKeypair = Keypair.random();
     const rogueAccount = new Account(rogueKeypair.publicKey(), '-1');
@@ -51,7 +49,7 @@ describe('sep10', () => {
     const xdr = tx.toXdr();
 
     // Should reject because our server did not sign this challenge
-    expect(() => verifyAndIssueToken(xdr)).toThrow('Challenge not signed by server');
+    expect(() => verifyChallenge(xdr)).toThrow('Challenge not signed by server');
   });
 
   // Challenge structure validation tests
@@ -70,7 +68,7 @@ describe('sep10', () => {
       tx.sign(clientKeypair);
       const xdr = tx.toXdr();
 
-      expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge: no operations found');
+      expect(() => verifyChallenge(xdr)).toThrow('Invalid challenge: no operations found');
     });
 
     it('throws when first operation is not manageData', () => {
@@ -95,7 +93,7 @@ describe('sep10', () => {
       tx.sign(clientKeypair);
       const xdr = tx.toXdr();
 
-      expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge: expected manageData operation');
+      expect(() => verifyChallenge(xdr)).toThrow('Invalid challenge: expected manageData operation');
     });
 
     it('throws when operation name does not match "scoutoff auth"', () => {
@@ -119,7 +117,7 @@ describe('sep10', () => {
       tx.sign(clientKeypair);
       const xdr = tx.toXdr();
 
-      expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge: wrong operation name');
+      expect(() => verifyChallenge(xdr)).toThrow('Invalid challenge: wrong operation name');
     });
 
     it('throws when nonce value is missing', () => {
@@ -143,7 +141,7 @@ describe('sep10', () => {
       tx.sign(clientKeypair);
       const xdr = tx.toXdr();
 
-      expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge: missing nonce value');
+      expect(() => verifyChallenge(xdr)).toThrow('Invalid challenge: missing nonce value');
     });
 
     it('throws when nonce is not exactly 64 bytes (decoded)', () => {
@@ -167,7 +165,7 @@ describe('sep10', () => {
       tx.sign(clientKeypair);
       const xdr = tx.toXdr();
 
-      expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge: nonce must be exactly 64 bytes');
+      expect(() => verifyChallenge(xdr)).toThrow('Invalid challenge: nonce must be exactly 64 bytes');
     });
 
     it('throws when operation source is missing', () => {
@@ -191,7 +189,7 @@ describe('sep10', () => {
       tx.sign(clientKeypair);
       const xdr = tx.toXdr();
 
-      expect(() => verifyAndIssueToken(xdr)).toThrow('Missing source account in challenge');
+      expect(() => verifyChallenge(xdr)).toThrow('Missing source account in challenge');
     });
 
     it('accepts valid challenge with correct structure', () => {
@@ -200,8 +198,7 @@ describe('sep10', () => {
       tx.sign(clientKeypair);
       const signedXdr = tx.toXdr();
 
-      const { token, account } = verifyAndIssueToken(signedXdr);
-      expect(typeof token).toBe('string');
+      const { account } = verifyChallenge(signedXdr);
       expect(account).toBe(clientKeypair.publicKey());
     });
   });
@@ -217,7 +214,7 @@ describe('sep10', () => {
       const realNow = Date.now;
       Date.now = () => realNow() + 400_000; // +400 seconds → past maxTime
       try {
-        expect(() => verifyAndIssueToken(signedXdr)).toThrow('Challenge has expired');
+        expect(() => verifyChallenge(signedXdr)).toThrow('Challenge has expired');
       } finally {
         Date.now = realNow;
       }
@@ -233,8 +230,8 @@ describe('sep10', () => {
       const realNow = Date.now;
       Date.now = () => realNow() - 1_000;
       try {
-        const { token } = verifyAndIssueToken(signedXdr);
-        expect(typeof token).toBe('string');
+        const { account } = verifyChallenge(signedXdr);
+        expect(account).toBe(clientKeypair.publicKey());
       } finally {
         Date.now = realNow;
       }
@@ -245,36 +242,35 @@ describe('sep10', () => {
   // Replay / nonce consumption (#693)
   // ---------------------------------------------------------------------------
   describe('challenge replay protection', () => {
-    it('rejects a second token exchange using the identical signed challenge', () => {
+    it('rejects a second redemption of the identical signed challenge', () => {
       const xdr = buildChallenge(clientKeypair.publicKey());
       const tx = new Transaction(xdr, Networks.TESTNET);
       tx.sign(clientKeypair);
       const signedXdr = tx.toXdr();
 
-      // First exchange succeeds and consumes the challenge's nonce.
-      const { token, account } = verifyAndIssueToken(signedXdr);
-      expect(typeof token).toBe('string');
+      // First verification succeeds and consumes the challenge's nonce.
+      const { account } = verifyChallenge(signedXdr);
       expect(account).toBe(clientKeypair.publicKey());
 
       // A second exchange with the exact same signed challenge — as an
       // attacker replaying a captured request would attempt — must be
-      // rejected rather than minting another token.
-      expect(() => verifyAndIssueToken(signedXdr)).toThrow('Challenge has already been used');
+      // rejected rather than reusing the challenge.
+      expect(() => verifyChallenge(signedXdr)).toThrow('Challenge has already been used');
     });
 
     it('does not consume the nonce when an earlier verification step fails', () => {
       // Unsigned challenge — fails signature verification before the nonce
       // would ever be recorded as consumed.
       const xdr = buildChallenge(clientKeypair.publicKey());
-      expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge signature');
+      expect(() => verifyChallenge(xdr)).toThrow('Invalid challenge signature');
 
       // Now sign it properly — this must still succeed, proving the failed
       // attempt above did not mark the nonce as used.
       const tx = new Transaction(xdr, Networks.TESTNET);
       tx.sign(clientKeypair);
       const signedXdr = tx.toXdr();
-      const { token } = verifyAndIssueToken(signedXdr);
-      expect(typeof token).toBe('string');
+      const { account } = verifyChallenge(signedXdr);
+      expect(account).toBe(clientKeypair.publicKey());
     });
 
     it('allows two different challenges (distinct nonces) to each be redeemed once', () => {
@@ -286,8 +282,8 @@ describe('sep10', () => {
       const txB = new Transaction(xdrB, Networks.TESTNET);
       txB.sign(clientKeypair);
 
-      expect(() => verifyAndIssueToken(txA.toXdr())).not.toThrow();
-      expect(() => verifyAndIssueToken(txB.toXdr())).not.toThrow();
+      expect(() => verifyChallenge(txA.toXdr())).not.toThrow();
+      expect(() => verifyChallenge(txB.toXdr())).not.toThrow();
     });
   });
 
@@ -307,7 +303,7 @@ describe('sep10', () => {
    * We simulate this by using jest.isolateModules() to load the sep10 module
    * twice from scratch — exactly as two separate Node.js processes would — with
    * the same SEP10_SERVER_SECRET env var, then assert that a challenge built by
-   * one "instance" verifies via the other's verifyAndIssueToken.
+   * one "instance" verifies via the other's verifyChallenge.
    */
   describe('cross-instance challenge verification (horizontal scaling fix)', () => {
     // A real Stellar secret key used as the shared SEP10_SERVER_SECRET.
@@ -316,7 +312,7 @@ describe('sep10', () => {
 
     function loadSep10WithSharedSecret(): Promise<{
       buildChallenge: (account: string) => string;
-      verifyAndIssueToken: (xdr: string, role?: string) => { token: string; account: string };
+      verifyChallenge: (xdr: string) => { account: string };
     }> {
       return new Promise((resolve, reject) => {
         jest.isolateModules(() => {
@@ -352,8 +348,7 @@ describe('sep10', () => {
 
       // Instance B verifies the signed challenge — must succeed despite being a
       // completely separate module instance (i.e. a different "process").
-      const { token, account } = instanceB.verifyAndIssueToken(signedXdr);
-      expect(typeof token).toBe('string');
+      const { account } = instanceB.verifyChallenge(signedXdr);
       expect(account).toBe(clientKeypair.publicKey());
     });
 
@@ -365,7 +360,7 @@ describe('sep10', () => {
       // This replicates the pre-fix behaviour when SEP10_SERVER_SECRET is absent.
       const instanceB = await new Promise<{
         buildChallenge: (account: string) => string;
-        verifyAndIssueToken: (xdr: string, role?: string) => { token: string; account: string };
+        verifyChallenge: (xdr: string) => { account: string };
       }>((resolve, reject) => {
         jest.isolateModules(() => {
           try {
@@ -387,7 +382,7 @@ describe('sep10', () => {
 
       // Instance B (different random keypair) must reject it — proving that
       // sharing the secret is the only way to make cross-instance auth work.
-      expect(() => instanceB.verifyAndIssueToken(signedXdr)).toThrow('Challenge not signed by server');
+      expect(() => instanceB.verifyChallenge(signedXdr)).toThrow('Challenge not signed by server');
     });
   });
 });
