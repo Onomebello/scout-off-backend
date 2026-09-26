@@ -397,6 +397,7 @@ const config = {
   },
   authRateLimit: {
     windowMs: parseNumericEnv('AUTH_RATE_LIMIT_WINDOW_MS', process.env.AUTH_RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
+    ipMax: parseNumericEnv('AUTH_RATE_LIMIT_IP_MAX', process.env.AUTH_RATE_LIMIT_IP_MAX, 60, { min: 1, integer: true }),
     max: parseNumericEnv('AUTH_RATE_LIMIT_MAX', process.env.AUTH_RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 5, { min: 1, integer: true }),
   },
   playerImportRateLimit: {

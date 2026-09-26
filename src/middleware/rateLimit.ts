@@ -20,6 +20,8 @@ export interface RateLimitOptions {
   windowMs?: number; // time window in ms (default: config.rateLimit.windowMs)
   max?: number;      // max requests per window per IP (default: config.rateLimit.max)
   store?: RateLimitStore; // override default store (useful for tests)
+  /** Return a stable subject key instead of the request IP for identity-based limits. */
+  keyGenerator?: (req: Request) => string | undefined;
   /**
    * Namespace distinguishing this limiter's counters from every other
    * rateLimit() instance sharing the same default store. Without this,
@@ -71,7 +73,8 @@ export function rateLimit(options: RateLimitOptions = {}) {
     const ip = req.ip ?? 'unknown';
 
     try {
-      const { count, resetAt } = await store.increment(`${namespace}:ip:${ip}`, windowMs);
+      const key = options.keyGenerator?.(req) || `ip:${ip}`;
+      const { count, resetAt } = await store.increment(`${namespace}:${key}`, windowMs);
 
       if (count > max) {
         const now = Date.now();

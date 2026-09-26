@@ -818,7 +818,8 @@ Operator topics (secrets rotation, data privacy, Postgres migration, deployment)
 | `RATE_LIMIT_WINDOW_MS`            | Rate limit window in milliseconds (default: `60000`)                                                                  |
 | `RATE_LIMIT_MAX`                  | Max requests per window (default: `60`)                                                                               |
 | `AUTH_RATE_LIMIT_WINDOW_MS`       | Auth rate limit window in milliseconds (default: `60000`)                                                             |
-| `AUTH_RATE_LIMIT_MAX`             | Max auth requests per window (default: `5`)                                                                           |
+| `AUTH_RATE_LIMIT_MAX`             | Max auth requests per account and endpoint per window (default: `5`)                                                  |
+| `AUTH_RATE_LIMIT_IP_MAX`          | Max requests per auth endpoint per IP and window (default: `60`)                                                      |
 | `CORS_ALLOWED_ORIGINS`            | Comma-separated list of allowed origins (environment-specific defaults)                                               |
 | `TRUSTED_PROXY_COUNT`             | Number of trusted reverse-proxy hops (default: `1`)                                                                   |
 | `WEBHOOK_ENABLED`                 | Set to `true` to enable event webhooks (default: `false`)                                                             |

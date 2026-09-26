@@ -39,23 +39,29 @@ Limits requests per IP address across all endpoints (except health checks).
 
 ### 2. Authentication Rate Limiter
 
-Stricter per-IP limit specifically on auth endpoints to prevent brute-force attacks.
+Auth routes use two independent limits per endpoint: a broad per-IP ceiling to
+protect the service and a stricter per-account ceiling to prevent an attacker
+from evading limits by switching IP addresses. Challenge, token, and refresh
+requests each have separate namespaces, so one step in a normal login does not
+consume another step's quota.
 
-**Namespace:** `auth`
+**Namespaces:** `auth:challenge`, `auth:token`, and `auth:refresh`
 
 **Configuration:**
 - `AUTH_RATE_LIMIT_WINDOW_MS`: Time window in milliseconds (default: `60000` = 1 minute)
-- `AUTH_RATE_LIMIT_MAX`: Max requests per window per IP (default: `5`)
+- `AUTH_RATE_LIMIT_MAX`: Max requests per account and endpoint per window (default: `5`)
+- `AUTH_RATE_LIMIT_IP_MAX`: Max requests per endpoint and IP per window (default: `60`)
 
-**Example:** Each IP can attempt auth 5 times per 60 seconds.
+**Example:** Each account can make up to 5 requests to each auth endpoint per
+minute, while a shared IP can make up to 60 requests to each endpoint.
 
 **Where applied:**
-- `POST /auth/challenge` — challenge generation
-- `POST /auth/token` — token signing
+- `GET /auth/challenge` — keyed by validated Stellar account
+- `POST /auth/token` — keyed by the source account extracted from the transaction
+- `POST /auth/refresh` — keyed by the verified refresh token's account
 
-**Use case:** Prevent brute-force attacks on challenge/token signing.
-
-**Trade-off:** Legitimate clients may hit this limit if they retry aggressively. 5 requests per minute is conservative; adjust upward if you see false positives.
+Malformed or unidentifiable auth requests still count against the per-IP
+ceiling. Account counters are shared across IPs when Redis is configured.
 
 ### 3. Wallet-Based Rate Limiter
 
@@ -150,11 +156,13 @@ try {
 - `RATE_LIMIT_WINDOW_MS=60000`
 - `RATE_LIMIT_MAX=60`
 - `AUTH_RATE_LIMIT_MAX=5`
+- `AUTH_RATE_LIMIT_IP_MAX=60`
 
 **Test** (`NODE_ENV=test`):
 - `RATE_LIMIT_ENABLED=true` (typically disabled in tests via middleware)
 - `RATE_LIMIT_MAX=1000` (high, to avoid test flakiness)
 - `AUTH_RATE_LIMIT_MAX=1000`
+- `AUTH_RATE_LIMIT_IP_MAX=1000`
 
 **Staging** (`NODE_ENV=staging`):
 - Same as production defaults (see below)
@@ -164,6 +172,7 @@ try {
 - `RATE_LIMIT_WINDOW_MS=60000`
 - `RATE_LIMIT_MAX=60` (1 req/sec average)
 - `AUTH_RATE_LIMIT_MAX=5`
+- `AUTH_RATE_LIMIT_IP_MAX=60`
 
 ### Adjusting Limits
 
@@ -174,13 +183,13 @@ RATE_LIMIT_MAX=200
 
 This increases the global limit to 200 requests per 60 seconds per IP. If you have a trusted partner or internal service making bulk requests, this may be necessary. Consider IP allowlisting as an alternative if available.
 
-**To tighten auth limits (more aggressive brute-force protection):**
+**To tighten per-account auth limits:**
 ```env
 AUTH_RATE_LIMIT_MAX=3
 AUTH_RATE_LIMIT_WINDOW_MS=300000  # 5-minute window instead of 1-minute
 ```
 
-This allows only 3 auth attempts per 5 minutes per IP — very strict, suitable for high-security deployments.
+This allows only 3 requests per endpoint, per account, per 5 minutes.
 
 **To disable rate limiting entirely (not recommended):**
 ```env
