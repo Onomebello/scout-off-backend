@@ -5442,7 +5442,7 @@
           "scouts"
         ],
         "summary": "DEPRECATED alias of POST /api/scouts/:wallet/trial-offers (#1034).",
-        "operationId": "createTrialOffer",
+        "operationId": "createTrialOfferAtScoutsByWalletTrialOfferPost",
         "description": "DEPRECATED alias of POST /api/scouts/:wallet/trial-offers (#1034). It runs the\nsame handler, so it carries the same middleware chain — including walletRateLimit\nand idempotency, which guard the on-chain submission this route now performs.\n\nUse POST /api/scouts/:wallet/trial-offers instead.",
         "deprecated": true,
         "parameters": [
@@ -5558,7 +5558,7 @@
           "scouts"
         ],
         "summary": "Submit a trial offer on-chain and promote the player to Elite Tier.",
-        "operationId": "createTrialOffer",
+        "operationId": "createTrialOfferAtScoutsByWalletTrialOffersPost",
         "description": "Canonical trial-offer submission (#285, #770): submits the offer on-chain,\nindexes it locally by tx_hash, promotes the player's tier and broadcasts SSE.\nThe singular /trial-offer path above is a deprecated alias of this POST.\nDistinct from the accept/reject workflow in trialOfferController.",
         "parameters": [
           {
@@ -6078,7 +6078,7 @@
           "validators"
         ],
         "summary": "List pending milestones for the authenticated validator, optionally filtered by region/position/playerId and paginated.",
-        "operationId": "getPendingMilestones",
+        "operationId": "getPendingMilestonesAtValidatorsMilestonesPendingGet",
         "description": "List pending milestones for the authenticated validator, optionally\nfiltered by region/position/playerId and paginated.",
         "parameters": [
           {
@@ -6162,7 +6162,7 @@
           "validators"
         ],
         "summary": "Same as GET /api/validators/milestones/pending, scoped explicitly to the given validator wallet rather than the caller's own token.",
-        "operationId": "getPendingMilestones",
+        "operationId": "getPendingMilestonesAtValidatorsByWalletMilestonesPendingGet",
         "description": "Same as GET /api/validators/milestones/pending, scoped explicitly to the\ngiven validator wallet rather than the caller's own token.",
         "parameters": [
           {
