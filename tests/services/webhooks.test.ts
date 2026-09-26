@@ -58,10 +58,16 @@ describe('postWebhookWithRetry', () => {
     const rawBody = init!.body as string;
     expect(rawBody).toBe(JSON.stringify(payload));
 
-    const signatureHeader = (init!.headers as Record<string, string>)['X-Webhook-Signature'];
+    const requestHeaders = init!.headers as Record<string, string>;
+    const signatureHeader = requestHeaders['X-Webhook-Signature'];
+    const timestamp = requestHeaders['X-Webhook-Timestamp'];
     expect(signatureHeader).toMatch(/^sha256=[0-9a-f]{64}$/);
+    expect(timestamp).toMatch(/^\d+$/);
 
-    const expectedDigest = crypto.createHmac('sha256', 'shh-secret').update(rawBody).digest('hex');
+    const expectedDigest = crypto
+      .createHmac('sha256', 'shh-secret')
+      .update(`${timestamp}.${rawBody}`)
+      .digest('hex');
     expect(signatureHeader).toBe(`sha256=${expectedDigest}`);
   });
 
@@ -73,6 +79,7 @@ describe('postWebhookWithRetry', () => {
 
     const [, init] = mockedFetch.mock.calls[0];
     expect((init!.headers as Record<string, string>)['X-Webhook-Signature']).toBeUndefined();
+    expect((init!.headers as Record<string, string>)['X-Webhook-Timestamp']).toBeUndefined();
   });
 
   it(
@@ -117,22 +124,32 @@ describe('signWebhookPayload', () => {
   it('produces the documented sha256=<hex> format, verifiable by recomputing the HMAC with the same secret', () => {
     const secret = 'my-subscriber-secret';
     const rawBody = JSON.stringify({ eventType: 'player_registered', payload: { wallet: 'GABC' } });
+    const timestamp = '1785000000';
 
-    const signature = signWebhookPayload(rawBody, secret);
+    const signature = signWebhookPayload(rawBody, secret, timestamp);
     expect(signature).toMatch(/^sha256=[0-9a-f]{64}$/);
 
-    // A receiver recomputing the HMAC over the same raw body with the same
-    // secret must derive the identical signature (docs/webhooks.md).
-    const recomputed = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+    const recomputed = crypto
+      .createHmac('sha256', secret)
+      .update(`${timestamp}.${rawBody}`)
+      .digest('hex');
     expect(signature).toBe(`sha256=${recomputed}`);
   });
 
   it('produces a different signature for a different secret or a different body', () => {
     const rawBody = JSON.stringify({ eventType: 'test' });
-    expect(signWebhookPayload(rawBody, 'secret-a')).not.toBe(signWebhookPayload(rawBody, 'secret-b'));
+    const timestamp = '1785000000';
+    expect(signWebhookPayload(rawBody, 'secret-a', timestamp)).not.toBe(
+      signWebhookPayload(rawBody, 'secret-b', timestamp),
+    );
 
     const otherBody = JSON.stringify({ eventType: 'other' });
-    expect(signWebhookPayload(rawBody, 'secret-a')).not.toBe(signWebhookPayload(otherBody, 'secret-a'));
+    expect(signWebhookPayload(rawBody, 'secret-a', timestamp)).not.toBe(
+      signWebhookPayload(otherBody, 'secret-a', timestamp),
+    );
+    expect(signWebhookPayload(rawBody, 'secret-a', timestamp)).not.toBe(
+      signWebhookPayload(rawBody, 'secret-a', '1785000001'),
+    );
   });
 });
 
@@ -154,8 +171,11 @@ describe('dispatchEventWebhook', () => {
     expect(call).toBeDefined();
     const [, init] = call!;
     const rawBody = init!.body as string;
-    const signatureHeader = (init!.headers as Record<string, string>)['X-Webhook-Signature'];
-    expect(signatureHeader).toBe(signWebhookPayload(rawBody, secret));
+    const requestHeaders = init!.headers as Record<string, string>;
+    const signatureHeader = requestHeaders['X-Webhook-Signature'];
+    expect(signatureHeader).toBe(
+      signWebhookPayload(rawBody, secret, requestHeaders['X-Webhook-Timestamp']),
+    );
     const parsed = JSON.parse(rawBody);
     expect(parsed.eventType).toBe('player_registered');
     expect(parsed.payload).toEqual({ wallet: 'GABC' });
@@ -237,14 +257,17 @@ describe('dispatchEventWebhook', () => {
       const rawBody = init!.body as string;
       const parsed = JSON.parse(rawBody);
 
-      // The HMAC is computed over the raw body that includes the deliveryId.
+      // The HMAC is computed over the signed timestamp and raw body, which
+      // includes the deliveryId.
       // If we swap the deliveryId and re-sign with the same secret,
       // the original signature no longer matches.
       const tampered = { ...parsed, deliveryId: 'forged-id' };
       const tamperedBody = JSON.stringify(tampered);
-      const originalSig = (init!.headers as Record<string, string>)['X-Webhook-Signature'];
-      expect(originalSig).toBe(signWebhookPayload(rawBody, secret));
-      expect(signWebhookPayload(tamperedBody, secret)).not.toBe(originalSig);
+      const headers = init!.headers as Record<string, string>;
+      const timestamp = headers['X-Webhook-Timestamp'];
+      const originalSig = headers['X-Webhook-Signature'];
+      expect(originalSig).toBe(signWebhookPayload(rawBody, secret, timestamp));
+      expect(signWebhookPayload(tamperedBody, secret, timestamp)).not.toBe(originalSig);
     },
     15000
   );

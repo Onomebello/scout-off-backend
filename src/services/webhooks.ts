@@ -48,13 +48,16 @@ function newDeliveryId(): string {
 /**
  * Computes the `X-Webhook-Signature` header value for a raw request body.
  *
- * Format: `sha256=<hex-encoded HMAC-SHA256 digest>`, computed over the exact
- * raw bytes sent on the wire (not a re-serialized object) using the
- * subscriber's secret as the HMAC key. See docs/webhooks.md for the
- * receiver-side verification procedure.
+ * Format: `sha256=<hex-encoded HMAC-SHA256 digest>`, computed over
+ * `<timestamp>.<raw body>` using the subscriber's secret as the HMAC key.
+ * The timestamp is Unix time in seconds and is sent separately in the
+ * `X-Webhook-Timestamp` header.
  */
-export function signWebhookPayload(rawBody: string, secret: string): string {
-  const digest = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+export function signWebhookPayload(rawBody: string, secret: string, timestamp: string): string {
+  const digest = crypto
+    .createHmac('sha256', secret)
+    .update(`${timestamp}.${rawBody}`)
+    .digest('hex');
   return `sha256=${digest}`;
 }
 
@@ -80,19 +83,26 @@ export async function postWebhookWithRetry(
     // Serialize once so the signature is computed over the exact bytes sent.
     const rawBody = JSON.stringify(payload);
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (options.secret) {
-      headers['X-Webhook-Signature'] = signWebhookPayload(rawBody, options.secret);
-    }
 
     for (let attempt = 1; attempt <= retries; attempt += 1) {
       span.setAttribute('webhook.attempt', attempt);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
+        const requestHeaders = { ...headers };
+        if (options.secret) {
+          const timestamp = String(Math.floor(Date.now() / 1000));
+          requestHeaders['X-Webhook-Timestamp'] = timestamp;
+          requestHeaders['X-Webhook-Signature'] = signWebhookPayload(
+            rawBody,
+            options.secret,
+            timestamp,
+          );
+        }
         const response = await fetch(url, {
           method: 'POST',
           body: rawBody,
-          headers,
+          headers: requestHeaders,
           signal: controller.signal,
         });
 

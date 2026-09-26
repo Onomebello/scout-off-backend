@@ -377,7 +377,9 @@ describe('POST /api/scouts/:wallet/webhooks/:id/test', () => {
     const [calledUrl, init] = mockFetch.mock.calls[0];
     expect(calledUrl).toBe(WEBHOOK_URL);
     expect((init!.headers as Record<string, string>)['Content-Type']).toBe('application/json');
-    expect((init!.headers as Record<string, string>)['X-Webhook-Signature']).toMatch(/^sha256=[0-9a-f]{64}$/);
+    const headers = init!.headers as Record<string, string>;
+    expect(headers['X-Webhook-Timestamp']).toMatch(/^\d+$/);
+    expect(headers['X-Webhook-Signature']).toMatch(/^sha256=[0-9a-f]{64}$/);
 
     // Payload must contain { event: 'test', timestamp }
     const body = JSON.parse(init!.body as string) as Record<string, unknown>;
