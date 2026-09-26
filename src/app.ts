@@ -209,7 +209,7 @@ const UPLOAD_PATHS = new Set([
   '/api/validators/milestone', '/api/v1/validators/milestone',
   '/api/v2/validators/milestone',
 ]);
-const AUTH_PATHS = new Set(['/auth/token', '/auth/challenge']);
+const AUTH_PATHS = new Set(['/auth/token', '/auth/challenge', '/auth/refresh', '/auth/logout']);
 
 app.use((req, res, next) => {
   if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {

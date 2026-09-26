@@ -73,6 +73,26 @@ describe('JSON Payload Size Limit', () => {
     expect(res.body.error).toContain('Payload too large');
   });
 
+  it('rejects a 2 KB body on /auth/refresh (auth limit 1 KB)', async () => {
+    const res = await request(app)
+      .post('/auth/refresh')
+      .set('Content-Type', 'application/json')
+      .send({ data: 'x'.repeat(2 * 1024) });
+
+    expect(res.status).toBe(413);
+    expect(res.body.error).toContain('Payload too large');
+  });
+
+  it('rejects a 2 KB body on /auth/logout (auth limit 1 KB)', async () => {
+    const res = await request(app)
+      .post('/auth/logout')
+      .set('Content-Type', 'application/json')
+      .send({ data: 'x'.repeat(2 * 1024) });
+
+    expect(res.status).toBe(413);
+    expect(res.body.error).toContain('Payload too large');
+  });
+
   it('rejects a 1.5 MB body on a standard endpoint (global limit 1 MB)', async () => {
     const largePayload = {
       data: 'x'.repeat(1.5 * 1024 * 1024),
