@@ -124,7 +124,16 @@ const corsOptions: CorsOptions = {
     'X-Idempotency-Key',
     'X-API-Version',
   ],
-  exposedHeaders: ['ETag', 'X-Correlation-ID', 'X-Response-Time', 'X-API-Version'],
+  exposedHeaders: [
+    'ETag',
+    'X-Correlation-ID',
+    'X-Response-Time',
+    'X-API-Version',
+    'API-Version',
+    'Location',
+    'Retry-After',
+    'X-RateLimit-Reputation-Limit',
+  ],
   // credentials cannot be used with a wildcard origin (CORS spec); only enable
   // it when we are using an explicit allowlist
   credentials: !isWildcard,
