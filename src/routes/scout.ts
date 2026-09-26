@@ -93,7 +93,7 @@ const webhookTestRateLimit = walletRateLimit({
  * @auth Bearer (scout role required)
  */
 router.route('/:wallet/subscription')
-  .get(requireRole('scout'), requireApiKeyScope('read:subscription'), requireWalletOwner({ mismatchStatus: 401 }), getSubscription)
+  .get(requireRole('scout'), requireApiKeyScope('read:subscription'), requireWalletOwner(), getSubscription)
   .all(methodNotAllowed(['GET', 'HEAD']));
 
 /**
@@ -155,7 +155,7 @@ router.route('/:wallet/subscribe')
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/contacts')
-  .get(requireRole('scout'), requireWalletOwner({ mismatchStatus: 401 }), getUnlockedContacts)
+  .get(requireRole('scout'), requireWalletOwner(), getUnlockedContacts)
   .all(methodNotAllowed(['GET', 'HEAD']));
 
 /**
@@ -172,7 +172,7 @@ router.route('/:wallet/contacts')
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/contacts/:playerId')
-  .get(requireRole('scout'), requireWalletOwner({ mismatchStatus: 401, validateAddress: false }), getContactDetails)
+  .get(requireRole('scout'), requireWalletOwner({ validateAddress: false }), getContactDetails)
   .all(methodNotAllowed(['GET', 'HEAD']));
 
 /**
