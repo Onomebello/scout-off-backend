@@ -63,6 +63,7 @@
     "multiformats": "^14.0.5",
     "node-fetch": "^2.7.0",
     "pg": "8.11.3",
+    "swagger-ui-dist": "^5.33.0",
     "zod": "3.23.8"
   },
   "devDependencies": {
