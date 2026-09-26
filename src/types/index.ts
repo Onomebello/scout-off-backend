@@ -208,6 +208,7 @@ export interface FeeHistoryItem {
 
 export type ContractEventType =
   | 'player_registered'
+  | 'profile_updated'
   | 'milestone_submitted'
   | 'milestone_approved'
   | 'milestone_rejected'
