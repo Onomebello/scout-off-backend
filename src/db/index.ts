@@ -278,6 +278,64 @@ interface EventRow {
 export interface GetEventsOptions {
   limit?: number;
   offset?: number;
+  payloadFilter?: EventPayloadFilter;
+  payloadAnyOf?: EventPayloadFilter[];
+  payloadIn?: Record<string, Array<string | number | boolean | null>>;
+  createdAfter?: number;
+}
+
+export type EventPayloadFilter = Record<string, string | number | boolean | null>;
+
+function eventPayloadPredicate(
+  filters: Pick<GetEventsOptions, 'payloadFilter' | 'payloadAnyOf' | 'payloadIn' | 'createdAfter'>,
+): { sql: string; params: unknown[] } {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  const column = (field: string): string => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) {
+      throw new Error(`Invalid event payload field: ${field}`);
+    }
+    return `json_extract(payload, '$."${field}"')`;
+  };
+
+  for (const [field, value] of Object.entries(filters.payloadFilter ?? {})) {
+    clauses.push(`${column(field)} = ?`);
+    params.push(value);
+  }
+
+  if (filters.payloadAnyOf?.length) {
+    const alternatives = filters.payloadAnyOf.map((filter) => {
+      const entries = Object.entries(filter);
+      if (entries.length === 0) {
+        throw new Error('Event payload alternatives must not be empty');
+      }
+      const conjunction = entries.map(([field, value]) => {
+        params.push(value);
+        return `${column(field)} = ?`;
+      });
+      return `(${conjunction.join(' AND ')})`;
+    });
+    clauses.push(`(${alternatives.join(' OR ')})`);
+  }
+
+  for (const [field, values] of Object.entries(filters.payloadIn ?? {})) {
+    if (values.length === 0) {
+      clauses.push('1 = 0');
+      continue;
+    }
+    clauses.push(`${column(field)} IN (${values.map(() => '?').join(', ')})`);
+    params.push(...values);
+  }
+
+  if (filters.createdAfter !== undefined) {
+    clauses.push('created_at >= ?');
+    params.push(filters.createdAfter);
+  }
+
+  return {
+    sql: clauses.length > 0 ? ` AND ${clauses.join(' AND ')}` : '',
+    params,
+  };
 }
 
 export function queryEvents(
@@ -287,25 +345,26 @@ export function queryEvents(
   const db = getDb();
   const { limit, offset } = opts ?? {};
   const hasPagination = limit !== undefined && offset !== undefined;
+  const payloadPredicate = eventPayloadPredicate(opts ?? {});
 
   let sql: string;
   let rows: EventRow[];
   if (type && hasPagination) {
     // sql-injection-check-ignore: EVENTS_ORDER_BY_SQL is a hardcoded ORDER BY fragment; values are bound via params.
-    sql = `SELECT * FROM events WHERE type = ? ORDER BY ${EVENTS_ORDER_BY_SQL} LIMIT ? OFFSET ?`;
-    rows = timedQuery(sql, () => db.prepare(sql).all(type, limit, offset) as EventRow[]);
+    sql = `SELECT * FROM events WHERE type = ?${payloadPredicate.sql} ORDER BY ${EVENTS_ORDER_BY_SQL} LIMIT ? OFFSET ?`;
+    rows = timedQuery(sql, () => db.prepare(sql).all(type, ...payloadPredicate.params, limit, offset) as EventRow[]);
   } else if (type) {
     // sql-injection-check-ignore: EVENTS_ORDER_BY_SQL is a hardcoded ORDER BY fragment; values are bound via params.
-    sql = `SELECT * FROM events WHERE type = ? ORDER BY ${EVENTS_ORDER_BY_SQL}`;
-    rows = timedQuery(sql, () => db.prepare(sql).all(type) as EventRow[]);
+    sql = `SELECT * FROM events WHERE type = ?${payloadPredicate.sql} ORDER BY ${EVENTS_ORDER_BY_SQL}`;
+    rows = timedQuery(sql, () => db.prepare(sql).all(type, ...payloadPredicate.params) as EventRow[]);
   } else if (hasPagination) {
     // sql-injection-check-ignore: EVENTS_ORDER_BY_SQL is a hardcoded ORDER BY fragment; values are bound via params.
-    sql = `SELECT * FROM events ORDER BY ${EVENTS_ORDER_BY_SQL} LIMIT ? OFFSET ?`;
-    rows = timedQuery(sql, () => db.prepare(sql).all(limit, offset) as EventRow[]);
+    sql = `SELECT * FROM events WHERE 1 = 1${payloadPredicate.sql} ORDER BY ${EVENTS_ORDER_BY_SQL} LIMIT ? OFFSET ?`;
+    rows = timedQuery(sql, () => db.prepare(sql).all(...payloadPredicate.params, limit, offset) as EventRow[]);
   } else {
     // sql-injection-check-ignore: EVENTS_ORDER_BY_SQL is a hardcoded ORDER BY fragment; values are bound via params.
-    sql = `SELECT * FROM events ORDER BY ${EVENTS_ORDER_BY_SQL}`;
-    rows = timedQuery(sql, () => db.prepare(sql).all() as EventRow[]);
+    sql = `SELECT * FROM events WHERE 1 = 1${payloadPredicate.sql} ORDER BY ${EVENTS_ORDER_BY_SQL}`;
+    rows = timedQuery(sql, () => db.prepare(sql).all(...payloadPredicate.params) as EventRow[]);
   }
 
   return rows.map((r) => ({
@@ -328,14 +387,17 @@ export function rollbackEventsFromLedger(ledger: number): void {
   db.prepare('DELETE FROM events WHERE ledger >= ?').run(ledger);
 }
 
-export function getEventsCount(type?: ContractEventType): number {
+export function getEventsCount(
+  type?: ContractEventType,
+  filters?: Pick<GetEventsOptions, 'payloadFilter' | 'payloadAnyOf' | 'payloadIn' | 'createdAfter'>,
+): number {
   const db = getDb();
+  const payloadPredicate = eventPayloadPredicate(filters ?? {});
   const sql = type
-    ? 'SELECT COUNT(*) AS count FROM events WHERE type = ?'
-    : 'SELECT COUNT(*) AS count FROM events';
-  const row = type
-    ? timedQuery(sql, () => db.prepare(sql).get(type) as { count: number } | undefined)
-    : timedQuery(sql, () => db.prepare(sql).get() as { count: number } | undefined);
+    ? `SELECT COUNT(*) AS count FROM events WHERE type = ?${payloadPredicate.sql}`
+    : `SELECT COUNT(*) AS count FROM events WHERE 1 = 1${payloadPredicate.sql}`;
+  const params = type ? [type, ...payloadPredicate.params] : payloadPredicate.params;
+  const row = timedQuery(sql, () => db.prepare(sql).get(...params) as { count: number } | undefined);
   return row?.count ?? 0;
 }
 

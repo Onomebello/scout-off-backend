@@ -584,20 +584,17 @@ export async function getPlayerMilestones(
   const includeRejected = status === "rejected";
 
   const approvedEvents = includeApproved
-    ? queryEvents("milestone_approved")
-        .filter((e) => e.payload.player_id === playerId)
+    ? queryEvents("milestone_approved", { payloadFilter: { player_id: playerId } })
         .map((e) => ({ ...e.payload, status: "approved" as const }))
     : [];
 
   const pendingEvents = includePending
-    ? queryEvents("milestone_submitted")
-        .filter((e) => e.payload.player_id === playerId)
+    ? queryEvents("milestone_submitted", { payloadFilter: { player_id: playerId } })
         .map((e) => ({ ...e.payload, status: "pending" as const }))
     : [];
 
   const rejectedEvents = includeRejected
-    ? queryEvents("milestone_rejected")
-        .filter((e) => e.payload.player_id === playerId)
+    ? queryEvents("milestone_rejected", { payloadFilter: { player_id: playerId } })
         .map((e) => ({ ...e.payload, status: "rejected" as const }))
     : [];
 

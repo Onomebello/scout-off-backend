@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
-import { queryEvents, countEventsFiltered, getEventsPage, getEventsPageKeyset, encodeEventsCursor, decodeEventsCursor, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount, AuditLogRow, getNewPlayersTimeSeries, getMilestonesApprovedTimeSeries, getContactUnlocksTimeSeries, getSubscriptionsStartedTimeSeries, getNewPlayersByRegionTimeSeries, TimeSeriesPoint, RegionBreakdownPoint, insertFeeWithdrawal, getWebhookDeliveries, getWebhookDeliverySummary } from '../db';
+import { queryEvents, getEventsCount, countEventsFiltered, getEventsPage, getEventsPageKeyset, encodeEventsCursor, decodeEventsCursor, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount, AuditLogRow, getNewPlayersTimeSeries, getMilestonesApprovedTimeSeries, getContactUnlocksTimeSeries, getSubscriptionsStartedTimeSeries, getNewPlayersByRegionTimeSeries, TimeSeriesPoint, RegionBreakdownPoint, insertFeeWithdrawal, getWebhookDeliveries, getWebhookDeliverySummary } from '../db';
 import { getAllValidators, insertValidator, revokeValidatorRow, getValidatorByWallet } from '../services/indexer';
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { STELLAR_ADDRESS_RE } from '../utils/validators';
@@ -128,10 +128,10 @@ export async function getStats(req: Request, res: Response, next: NextFunction):
     res.json({
       success: true,
       data: {
-        players: queryEvents('player_registered').length,
-        milestones: queryEvents('milestone_approved').length,
-        subscriptions: queryEvents('scout_subscribed').length,
-        events: queryEvents().length,
+        players: getEventsCount('player_registered'),
+        milestones: getEventsCount('milestone_approved'),
+        subscriptions: getEventsCount('scout_subscribed'),
+        events: getEventsCount(),
       },
     });
     return;

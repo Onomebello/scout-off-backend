@@ -11,6 +11,7 @@ import {
   updatePlayerProgress,
   insertPendingMilestone,
   queryEvents,
+  getEventsCount,
   rollbackEventsFromLedger,
 } from '../db';
 import { dispatchEventWebhook } from './webhooks';
@@ -294,9 +295,9 @@ export async function indexEvents(): Promise<void> {
         } else if (type === 'milestone_approved') {
           const playerId = payload.player_id as string;
           if (playerId) {
-            const approvedMilestoneCount = queryEvents('milestone_approved').filter(
-              (e) => e.payload.player_id === playerId,
-            ).length;
+            const approvedMilestoneCount = getEventsCount('milestone_approved', {
+              payloadFilter: { player_id: playerId },
+            });
             await updatePlayerProgress(
               playerId,
               tierForApprovedMilestones(approvedMilestoneCount),

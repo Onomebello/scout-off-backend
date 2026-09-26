@@ -4,7 +4,7 @@ import { z } from 'zod';
 import axios from 'axios';
 import { logger } from '../utils/logger';
 import { pinJson, pinFile } from '../services/ipfs';
-import { getPendingMilestones as getPendingMilestonesFromDb, getDriver, removePendingMilestone, incrementValidatorApproved, queryEvents, updatePlayerProgress, getValidatorStats } from '../db';
+import { getPendingMilestones as getPendingMilestonesFromDb, getDriver, removePendingMilestone, incrementValidatorApproved, queryEvents, getEventsCount, updatePlayerProgress, getValidatorStats } from '../db';
 import { invalidateMilestoneCache } from '../services/cache';
 import { recordAudit } from '../utils/audit';
 import { isValidMetadataUri, URI_VALIDATION_ERROR } from '../utils/uriValidator';
@@ -265,9 +265,9 @@ try {
         await removePendingMilestone(milestoneId);
         await incrementValidatorApproved(validatorWallet);
 
-        const onChainApprovedCount = queryEvents('milestone_approved').filter(
-          (e) => e.payload.player_id === playerId
-        ).length;
+        const onChainApprovedCount = getEventsCount('milestone_approved', {
+          payloadFilter: { player_id: playerId },
+        });
 
         // Count this new off-chain approval + existing ones
         await updatePlayerProgress(playerId, tierForApprovedMilestones(onChainApprovedCount + 1));
@@ -340,14 +340,10 @@ export async function getValidatorDashboardStats(
     const nowSeconds = Math.floor(Date.now() / 1000);
     const cutoff = nowSeconds - THIRTY_DAYS_SECONDS;
 
-    const approvedEvents = queryEvents('milestone_approved');
-    const approvedLast30d = approvedEvents.filter((e) => {
-      const isThisValidator =
-        e.payload.validator === wallet || e.payload.validator_wallet === wallet;
-      const withinWindow =
-        typeof e.created_at === 'number' && e.created_at >= cutoff;
-      return isThisValidator && withinWindow;
-    }).length;
+    const approvedLast30d = getEventsCount('milestone_approved', {
+      payloadAnyOf: [{ validator: wallet }, { validator_wallet: wallet }],
+      createdAfter: cutoff,
+    });
 
     // 4. Build the recent-activity list (bounded to RECENT_ACTIVITY_LIMIT).
     //    Combine submitted, approved, and rejected events for this validator.
@@ -359,11 +355,8 @@ export async function getValidatorDashboardStats(
 
     const recentActivity = milestoneEventTypes
       .flatMap((type) =>
-        queryEvents(type).filter((e) => {
-          return (
-            e.payload.validator === wallet ||
-            e.payload.validator_wallet === wallet
-          );
+        queryEvents(type, {
+          payloadAnyOf: [{ validator: wallet }, { validator_wallet: wallet }],
         }).map((e) => ({
           type: e.type as string,
           playerId: (e.payload.player_id ?? e.payload.playerId ?? null) as string | null,
