@@ -7,6 +7,7 @@ import {
   BroadcastEvent,
 } from '../services/eventBroadcaster';
 import { ContractEventType } from '../types';
+import { getPlayerByWallet } from '../db';
 import { logger } from '../utils/logger';
 import {
   isWalletBlocklisted,
@@ -148,8 +149,10 @@ let authSweepTimer: NodeJS.Timeout | null = null;
  *                When omitted no additional player-level filtering is applied.
  *
  * Filtering: only events relevant to the authenticated wallet are sent (wallet
- * isolation is always enforced regardless of query params).  The optional
- * query params add further narrowing on top.
+ * isolation is always enforced regardless of query params). Player events are
+ * matched through the authenticated wallet's player record, since their payload
+ * carries a player ID rather than a wallet address. Optional query params add
+ * further narrowing on top.
  *
  * SSE event types sent:
  *   - milestone_approved  (player: their own milestone approvals)
@@ -205,6 +208,10 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
     return;
   }
 
+  // Resolve the player's cuid2 once per connection; contract events carry the
+  // player ID, while authentication identifies the owner by wallet.
+  const player = await getPlayerByWallet(wallet);
+
   // ── Parse optional filter query params ────────────────────────────────────
   const rawEventType = req.query.eventType as string | undefined;
   const rawPlayerId = req.query.playerId as string | undefined;
@@ -242,6 +249,7 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
 
   const subscriber: SseSubscriber = {
     wallet,
+    playerId: player?.player_id,
     filter,
     send(event: BroadcastEvent): void {
       // write() returns false when the kernel buffer is full; we ignore the
