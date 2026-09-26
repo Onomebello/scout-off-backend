@@ -88,6 +88,7 @@ import {
   getWebhookSubscriptionById,
   deleteWebhookSubscription,
 } from '../../src/db';
+import { WebhookSubscriptionLimitError } from '../../src/utils/scoutResourceLimits';
 
 const mockCreate   = createWebhookSubscription   as jest.Mock;
 const mockListByScout = getWebhookSubscriptionsByScout as jest.Mock;
@@ -187,6 +188,23 @@ describe('POST /api/scouts/:wallet/webhooks', () => {
       SCOUT_A,
       ['player_registered', 'milestone_approved'],
     );
+  });
+
+  it('returns 409 when the scout has reached the subscription limit', async () => {
+    mockCreate.mockImplementationOnce(() => {
+      throw new WebhookSubscriptionLimitError();
+    });
+
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/webhooks`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ url: WEBHOOK_URL });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      success: false,
+      error: 'Webhook subscription limit reached (10 per scout)',
+    });
   });
 
   it('returns 400 for an invalid URL', async () => {

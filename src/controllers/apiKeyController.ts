@@ -34,6 +34,7 @@ import {
   normalizeRequestedScopes,
 } from '../utils/apiKeyScopes';
 import { deriveApiKeyLookupHash } from '../utils/apiKeyLookup';
+import { ApiKeyLimitError } from '../utils/scoutResourceLimits';
 
 // ─── Hashing helpers (mirrors tokenBlocklist.ts conventions) ──────────────────
 
@@ -216,6 +217,8 @@ export const rotateKeySchema = z.object({
  * Issue a new API key.  The plaintext key is returned exactly once in the
  * response and is never stored.  Subsequent GET calls return only the hash
  * prefix and metadata.
+ *
+ * @response 409 Scout API key limit reached
  */
 export async function issueApiKey(
   req: Request,
@@ -247,18 +250,27 @@ export async function issueApiKey(
   }
 
   const grantedScopes = scopesResult.scopes;
-  const id = await insertApiKey({
-    key_hash: keyHash,
-    scout_wallet: req.params.wallet as string,
-    label: parsed.data.label,
-    created_at: now,
-    scopes: grantedScopes.length > 0 ? grantedScopes : undefined,
-    // Indexed lookup value (#1033). Persisted alongside the salted
-    // verification hash so this key never touches the transitional scan
-    // path; deliberately absent from the response body below.
-    lookup_hash: lookupHash,
-    expires_at: expiresAt,
-  });
+  let id: number;
+  try {
+    id = await insertApiKey({
+      key_hash: keyHash,
+      scout_wallet: req.params.wallet as string,
+      label: parsed.data.label,
+      created_at: now,
+      scopes: grantedScopes.length > 0 ? grantedScopes : undefined,
+      // Indexed lookup value (#1033). Persisted alongside the salted
+      // verification hash so this key never touches the transitional scan
+      // path; deliberately absent from the response body below.
+      lookup_hash: lookupHash,
+      expires_at: expiresAt,
+    });
+  } catch (err) {
+    if (err instanceof ApiKeyLimitError) {
+      res.status(409).json({ success: false, error: err.message });
+      return;
+    }
+    throw err;
+  }
 
   logger.info({ scout: req.params.wallet as string, action: 'api_key_issued', keyId: id, scopes: grantedScopes.length > 0 ? grantedScopes : null, expiresAt });
 
@@ -389,15 +401,24 @@ export async function rotateApiKey(
     newExpiresAt = now + Math.max(originalLifetimeSecs, 0);
   }
 
-  const newId = await insertApiKey({
-    key_hash: keyHash,
-    scout_wallet: req.params.wallet as string,
-    label: oldRow.label,
-    created_at: now,
-    scopes: inheritedScopes ?? undefined,
-    lookup_hash: lookupHash,
-    expires_at: newExpiresAt,
-  });
+  let newId: number;
+  try {
+    newId = await insertApiKey({
+      key_hash: keyHash,
+      scout_wallet: req.params.wallet as string,
+      label: oldRow.label,
+      created_at: now,
+      scopes: inheritedScopes ?? undefined,
+      lookup_hash: lookupHash,
+      expires_at: newExpiresAt,
+    });
+  } catch (err) {
+    if (err instanceof ApiKeyLimitError) {
+      res.status(409).json({ success: false, error: err.message });
+      return;
+    }
+    throw err;
+  }
 
   const revokesAt = now + parsed.data.gracePeriodSeconds;
   await scheduleApiKeyRevocation(id, req.params.wallet as string, revokesAt);
