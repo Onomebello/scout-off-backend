@@ -209,6 +209,69 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
   });
 });
 
+describe('indexEvents — API/on-chain player ID mapping', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('links a pending API player from player_rg and maps later milestone IDs to its CUID', async () => {
+    const { Address, Keypair, nativeToScVal } = require('@stellar/stellar-sdk');
+    const {
+      getPlayerById,
+      insertOrUpdatePlayer,
+      persistLastIndexedLedger,
+      queryEvents,
+    } = require('../../src/db');
+    const apiPlayerId = `pending-${Math.random().toString(36).slice(2)}`;
+    const wallet = Keypair.random().publicKey();
+    const validator = Keypair.random().publicKey();
+    const onChainPlayerId = 987654321n;
+    const onChainPlayerIdString = onChainPlayerId.toString();
+    await insertOrUpdatePlayer({ player_id: apiPlayerId, wallet });
+    persistLastIndexedLedger(0);
+
+    server.getEvents.mockResolvedValue({
+      latestLedger: 502,
+      events: [
+        {
+          topic: [
+            nativeToScVal('player_rg', { type: 'symbol' }),
+            Address.fromString(wallet).toScVal(),
+          ],
+          value: nativeToScVal([onChainPlayerId, 'ipfs://meta', 'forward', 'europe']),
+          ledger: 500,
+          txHash: 'player-register-mapping-tx',
+          eventIndex: 0,
+        },
+        {
+          topic: [
+            nativeToScVal('milestone_submitted', { type: 'symbol' }),
+            Address.fromString(validator).toScVal(),
+            nativeToScVal(onChainPlayerId, { type: 'u64' }),
+          ],
+          value: nativeToScVal([11n, 'identity', 'ipfs://evidence']),
+          ledger: 501,
+          txHash: 'milestone-mapping-tx',
+          eventIndex: 0,
+        },
+      ],
+    });
+
+    await indexEvents();
+
+    expect((await getPlayerById(apiPlayerId)).on_chain_player_id).toBe(onChainPlayerIdString);
+    const milestone = queryEvents('milestone_submitted').find(
+      (event: { payload: Record<string, unknown> }) => event.payload.milestone_id === '11',
+    );
+    expect(milestone?.payload).toMatchObject({
+      player_id: apiPlayerId,
+      on_chain_player_id: onChainPlayerIdString,
+      milestone_type: 'identity',
+      evidence_uri: 'ipfs://evidence',
+    });
+  });
+});
+
 describe('indexEvents — player cache invalidation (#763)', () => {
   beforeEach(() => {
     jest.clearAllMocks();

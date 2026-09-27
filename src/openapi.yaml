@@ -94,6 +94,16 @@ components:
       properties:
         player_id:
           type: string
+          description: API player identifier (cuid2)
+        on_chain_player_id:
+          type: string
+          nullable: true
+          description: Sequential u64 ID assigned by the register contract; null while registration is pending
+        registration_status:
+          type: string
+          enum:
+            - pending
+            - registered
         wallet:
           type: string
         position:
@@ -1975,7 +1985,9 @@ paths:
                   additionalProperties: false
       responses:
         '201':
-          description: '{ success: true, data: { playerId, metadataUri, gatewayUrl } }'
+          description: >-
+            { success: true, data: { playerId, onChainPlayerId, registrationStatus,
+            onChainRegistration, metadataUri, gatewayUrl } }
         '400':
           description: '{ success: false, error: string } - Invalid body'
         '403':
@@ -2383,6 +2395,8 @@ paths:
       description: |-
         Purchase Player Tokens for the given player (stub — no real XLM transfer).
         Gated by the `player_tokens` feature flag — returns 404 when disabled.
+        The authenticated account is the buyer; the optional buyerWallet field is
+        accepted for compatibility only when it matches that account.
       parameters:
         - name: playerId
           in: path
@@ -2392,7 +2406,7 @@ paths:
           description: The player's on-chain identifier
       requestBody:
         required: true
-        description: '{ amount: number, buyerWallet: string }'
+        description: '{ amount: number, buyerWallet?: string }'
         content:
           application/json:
             schema:
@@ -2406,13 +2420,16 @@ paths:
                   minLength: 1
               required:
                 - amount
-                - buyerWallet
               additionalProperties: false
       responses:
         '200':
           description: '{ success: true, data: { playerId, buyerWallet, amount, newBalance } }'
         '400':
           description: '{ success: false, error: string } - Invalid amount'
+        '401':
+          description: '{ success: false, error: string } - Authentication required'
+        '403':
+          description: '{ success: false, error: string } - buyerWallet does not match authenticated account'
         '404':
           description: '{ success: false, error: string } - Feature flag disabled or player not found'
       security:

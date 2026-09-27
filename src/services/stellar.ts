@@ -12,6 +12,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
+import { getPlayerById } from '../db';
 import { correlationMemoFromContext, recordTxCorrelation } from './txCorrelation';
 
 import { stellarBreaker } from '../utils/circuitBreaker';
@@ -96,6 +97,7 @@ export type PaymentErrorCode =
   | 'INVALID_ACCOUNT'
   | 'NETWORK_ERROR'
   | 'MISSING_PLAYER'
+  | 'PENDING_REGISTRATION'
   | 'EXPIRED_TRUSTLINE'
   | 'CONTRACT_PAUSED'
   | 'CONTRACT_ERROR'
@@ -109,6 +111,26 @@ export class PaymentError extends Error {
     super(message);
     this.name = 'PaymentError';
   }
+}
+
+async function resolveOnChainPlayerId(playerId: string): Promise<bigint | null> {
+  const player = await getPlayerById(playerId);
+  if (!player) {
+    throw new PaymentError('Player not found', 'MISSING_PLAYER');
+  }
+  if (!player.on_chain_player_id) return null;
+  if (!/^\d+$/.test(player.on_chain_player_id)) {
+    throw new PaymentError('Invalid on-chain player ID mapping', 'CONTRACT_ERROR');
+  }
+  return BigInt(player.on_chain_player_id);
+}
+
+async function requireOnChainPlayerId(playerId: string): Promise<bigint> {
+  const onChainPlayerId = await resolveOnChainPlayerId(playerId);
+  if (onChainPlayerId === null) {
+    throw new PaymentError('Player registration is pending on-chain', 'PENDING_REGISTRATION');
+  }
+  return onChainPlayerId;
 }
 
 /** Matches the contract's ContractPaused (#10) error in a simulation/result error string. */
@@ -293,6 +315,7 @@ export async function submitContactPayment(
       if (!scoutWallet || !playerId) {
         throw new PaymentError('Missing scoutWallet or playerId', 'INVALID_ACCOUNT');
       }
+      const onChainPlayerId = await requireOnChainPlayerId(playerId);
 
       const { getPlatformKeypair } = await import('../utils/signer');
       const keypair = getPlatformKeypair();
@@ -311,7 +334,7 @@ export async function submitContactPayment(
           contract.call(
             'pay_to_contact',
             Address.fromString(scoutWallet).toScVal(),
-            nativeToScVal(playerId, { type: 'string' }),
+            nativeToScVal(onChainPlayerId, { type: 'u64' }),
           ),
         )
         .setTimeout(30)
@@ -408,6 +431,7 @@ export async function logTrialOffer(
       if (!scoutWallet || !playerId || !detailsUri) {
         throw new PaymentError('Missing scoutWallet, playerId, or detailsUri', 'INVALID_ACCOUNT');
       }
+      const onChainPlayerId = await requireOnChainPlayerId(playerId);
 
       const { getPlatformKeypair } = await import('../utils/signer');
       const keypair = getPlatformKeypair();
@@ -426,7 +450,7 @@ export async function logTrialOffer(
           contract.call(
             'log_trial_offer',
             Address.fromString(scoutWallet).toScVal(),
-            nativeToScVal(playerId, { type: 'string' }),
+            nativeToScVal(onChainPlayerId, { type: 'u64' }),
             nativeToScVal(detailsUri, { type: 'string' }),
           ),
         )
@@ -1474,6 +1498,7 @@ export async function updateProfile(
       if (!playerId || !metadataUri) {
         throw new PaymentError('playerId and metadataUri are required', 'INVALID_ACCOUNT');
       }
+      const onChainPlayerId = await requireOnChainPlayerId(playerId);
 
       const { getPlatformKeypair } = await import('../utils/signer');
       const keypair = getPlatformKeypair();
@@ -1491,7 +1516,7 @@ export async function updateProfile(
         .addOperation(
           contract.call(
             'update_profile',
-            nativeToScVal(playerId, { type: 'string' }),
+            nativeToScVal(onChainPlayerId, { type: 'u64' }),
             nativeToScVal(metadataUri, { type: 'string' }),
           ),
         )
@@ -1607,6 +1632,8 @@ export async function queryMilestones(playerId: string): Promise<OnChainMileston
       if (!playerId) {
         throw new PaymentError('Missing playerId', 'INVALID_ACCOUNT');
       }
+      const onChainPlayerId = await resolveOnChainPlayerId(playerId);
+      if (onChainPlayerId === null) return [];
 
       try {
         const contract = new Contract(config.progressContractId);
@@ -1617,7 +1644,7 @@ export async function queryMilestones(playerId: string): Promise<OnChainMileston
 
         const tx = createTxBuilder(sourceAccount)
           .addOperation(
-            contract.call('get_milestones', nativeToScVal(playerId, { type: 'string' })),
+            contract.call('get_milestones', nativeToScVal(onChainPlayerId, { type: 'u64' })),
           )
           .setTimeout(30)
           .build();
@@ -1657,6 +1684,33 @@ export async function queryMilestones(playerId: string): Promise<OnChainMileston
       span.end();
     }
   });
+}
+
+/** Read the register contract's wallet mapping for one-time database backfills. */
+export async function queryOnChainPlayerId(wallet: string): Promise<string | null> {
+  if (!wallet) throw new PaymentError('Missing wallet', 'INVALID_ACCOUNT');
+
+  const ephemeral = Keypair.random();
+  const sourceAccount = new Account(ephemeral.publicKey(), '0');
+  const contract = new Contract(config.registerContractId);
+  const tx = createTxBuilder(sourceAccount)
+    .addOperation(
+      contract.call('get_player_id', Address.fromString(wallet).toScVal()),
+    )
+    .setTimeout(30)
+    .build();
+  const simResult = await server.simulateTransaction(tx);
+  if (rpc.Api.isSimulationError(simResult)) {
+    throw new PaymentError(
+      `Contract simulation failed: ${simResult.error ?? ''}`,
+      'NETWORK_ERROR',
+    );
+  }
+
+  const retval = (simResult as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+  if (!retval) return null;
+  const playerId = scValToNative(retval);
+  return playerId === null || playerId === undefined ? null : String(playerId);
 }
 
 /**

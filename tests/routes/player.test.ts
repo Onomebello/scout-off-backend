@@ -345,6 +345,7 @@ describe('POST /api/players/register — immediate DB write (#282)', () => {
     expect(call.region).toBe('europe');
     expect(call.metadata_uri).toBeDefined();
     expect(call.player_id).toBeDefined();
+    expect(call.on_chain_player_id).toBeNull();
   });
 
   it('returns playerId in the response body', async () => {
@@ -356,6 +357,17 @@ describe('POST /api/players/register — immediate DB write (#282)', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.data.playerId).toBeDefined();
+    expect(res.body.data.onChainPlayerId).toBeNull();
+    expect(res.body.data.registrationStatus).toBe('pending');
+    expect(res.body.data.onChainRegistration).toMatchObject({
+      method: 'register_player',
+      args: {
+        wallet: PLAYER_WALLET,
+        metadataUri: validPayload.metadataUri,
+        position: 'forward',
+        region: 'europe',
+      },
+    });
   });
 });
 

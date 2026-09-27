@@ -606,6 +606,7 @@ export function* getEventsIterable(filter: EventsPageFilter): Generator<EventExp
 
 export interface PlayerRow {
   player_id: string;
+  on_chain_player_id: string | null;
   wallet: string;
   position: string | null;
   region: string | null;
@@ -679,6 +680,7 @@ export async function getPlayerProfileHistoryVersioned(
 
 export async function insertOrUpdatePlayer(p: {
   player_id: string;
+  on_chain_player_id?: string | null;
   wallet: string;
   position?: string;
   region?: string;
@@ -686,15 +688,16 @@ export async function insertOrUpdatePlayer(p: {
   created_at?: number;
   registered_at?: number;
 }): Promise<void> {
-  const sql = `INSERT INTO players (player_id, wallet, position, region, metadata_uri, created_at, registered_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+  const sql = `INSERT INTO players (player_id, on_chain_player_id, wallet, position, region, metadata_uri, created_at, registered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(player_id) DO UPDATE SET
+         on_chain_player_id = COALESCE(excluded.on_chain_player_id, players.on_chain_player_id),
          wallet       = excluded.wallet,
          position     = excluded.position,
          region       = excluded.region,
          metadata_uri = excluded.metadata_uri`;
   await timedQueryAsync(sql, () =>
-    getDriver().run(sql, [p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null, p.registered_at ?? 0])
+    getDriver().run(sql, [p.player_id, p.on_chain_player_id ?? null, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null, p.registered_at ?? 0])
   );
 }
 
@@ -859,6 +862,136 @@ export async function getPlayerByWallet(wallet: string): Promise<PlayerRow | nul
   return timedQueryAsync(sql, async () =>
     (await getDriver().get<PlayerRow>(sql, [wallet])) ?? null
   );
+}
+
+export async function getPlayerByOnChainId(onChainPlayerId: string): Promise<PlayerRow | null> {
+  const sql = 'SELECT * FROM players WHERE on_chain_player_id = ?';
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<PlayerRow>(sql, [onChainPlayerId])) ?? null
+  );
+}
+
+export async function getPlayersMissingOnChainId(
+  afterPlayerId: string,
+  limit: number,
+): Promise<PlayerRow[]> {
+  const sql = `SELECT * FROM players
+               WHERE on_chain_player_id IS NULL AND player_id > ?
+               ORDER BY player_id LIMIT ?`;
+  return timedQueryAsync(sql, () => getDriver().all<PlayerRow>(sql, [afterPlayerId, limit]));
+}
+
+export async function setPlayerOnChainId(
+  playerId: string,
+  onChainPlayerId: string,
+): Promise<void> {
+  const sql = `UPDATE players SET on_chain_player_id = ?
+               WHERE player_id = ? AND (on_chain_player_id IS NULL OR on_chain_player_id = ?)`;
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [onChainPlayerId, playerId, onChainPlayerId]),
+  );
+  const player = await getPlayerById(playerId);
+  if (!player || player.on_chain_player_id !== onChainPlayerId) {
+    throw new Error(`Player ${playerId} already has a different on-chain ID mapping`);
+  }
+}
+
+// ─── Player token registry ───────────────────────────────────────────────────
+
+export interface PlayerTokenHolderRow {
+  holder_wallet: string;
+  token_balance: number | string;
+}
+
+export interface PlayerTokenInventory {
+  totalSupply: number;
+  soldTokens: number;
+  holders: Array<{ holder: string; tokens: number }>;
+}
+
+export type PlayerTokenPurchaseResult =
+  | { status: 'not_found' }
+  | { status: 'exhausted'; remaining: number }
+  | { status: 'purchased'; newBalance: number };
+
+export async function seedPlayerTokenSupply(
+  playerId: string,
+  totalSupply: number,
+): Promise<void> {
+  const sql = `INSERT INTO player_token_supply (player_id, total_supply)
+               VALUES (?, ?)
+               ON CONFLICT(player_id) DO UPDATE SET total_supply = excluded.total_supply`;
+  await timedQueryAsync(sql, () => getDriver().run(sql, [playerId, totalSupply]));
+}
+
+export async function getPlayerTokenInventory(
+  playerId: string,
+): Promise<PlayerTokenInventory | null> {
+  const supplySql = 'SELECT total_supply FROM player_token_supply WHERE player_id = ?';
+  const supply = await timedQueryAsync(supplySql, () =>
+    getDriver().get<{ total_supply: number | string }>(supplySql, [playerId]),
+  );
+  if (!supply) return null;
+
+  const holdersSql = `SELECT holder_wallet, token_balance
+                      FROM player_token_balances
+                      WHERE player_id = ?
+                      ORDER BY holder_wallet`;
+  const rows = await timedQueryAsync(holdersSql, () =>
+    getDriver().all<PlayerTokenHolderRow>(holdersSql, [playerId]),
+  );
+  const holders = rows.map((row) => ({
+    holder: row.holder_wallet,
+    tokens: Number(row.token_balance),
+  }));
+
+  return {
+    totalSupply: Number(supply.total_supply),
+    soldTokens: holders.reduce((total, row) => total + row.tokens, 0),
+    holders,
+  };
+}
+
+export async function purchasePlayerTokens(
+  playerId: string,
+  buyerWallet: string,
+  amount: number,
+): Promise<PlayerTokenPurchaseResult> {
+  return getDriver().transaction(async (tx) => {
+    await tx.lockForWrite(`player-token:${playerId}`);
+
+    const supply = await tx.get<{ total_supply: number | string }>(
+      'SELECT total_supply FROM player_token_supply WHERE player_id = ?',
+      [playerId],
+    );
+    if (!supply) return { status: 'not_found' };
+
+    const sold = await tx.value<number | string>(
+      'SELECT COALESCE(SUM(token_balance), 0) FROM player_token_balances WHERE player_id = ?',
+      [playerId],
+    );
+    const remaining = Number(supply.total_supply) - Number(sold ?? 0);
+    if (amount > remaining) return { status: 'exhausted', remaining };
+
+    const balanceSql = `INSERT INTO player_token_balances (player_id, holder_wallet, token_balance)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(player_id, holder_wallet) DO UPDATE
+                        SET token_balance = player_token_balances.token_balance + excluded.token_balance`;
+    await tx.run(balanceSql, [playerId, buyerWallet, amount]);
+
+    const balance = await tx.value<number | string>(
+      'SELECT token_balance FROM player_token_balances WHERE player_id = ? AND holder_wallet = ?',
+      [playerId, buyerWallet],
+    );
+    return { status: 'purchased', newBalance: Number(balance) };
+  });
+}
+
+export async function resetPlayerTokenRegistry(): Promise<void> {
+  await getDriver().transaction(async (tx) => {
+    await tx.run('DELETE FROM player_token_balances');
+    await tx.run('DELETE FROM player_token_supply');
+  });
 }
 
 export async function deactivatePlayer(playerId: string): Promise<void> {

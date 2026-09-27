@@ -6,8 +6,11 @@ use scout_off_shared::{
     storage::{
         add_authorized_updater, bump_instance, get_authorized_updaters, is_authorized_updater,
         is_initialized, is_paused, remove_authorized_updater, set_initialized, set_paused,
+        LEDGER_BUMP_AMOUNT, LEDGER_LIFETIME_THRESHOLD,
     },
 };
+
+const MAX_PLAYER_MIGRATION_BATCH: u32 = 100;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -39,6 +42,64 @@ pub enum DataKey {
     // (`add_authorized_updater` / `remove_authorized_updater`) which store the
     // allowlist under `DataKey::AuthorizedUpdaters` in shared storage.
     AuthorizedUpdater,
+    // Appended to preserve the encoding of keys used by deployed instances.
+    PlayerMigrationCursor,
+    PlayerDataMigrated,
+}
+
+fn get_player_data(env: &Env, player_id: u64) -> Option<PlayerData> {
+    let key = DataKey::Player(player_id);
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().extend_ttl(
+            &key,
+            LEDGER_LIFETIME_THRESHOLD,
+            LEDGER_BUMP_AMOUNT,
+        );
+        env.storage().persistent().get(&key)
+    } else {
+        let player = env.storage().instance().get(&key);
+        if player.is_some() {
+            bump_instance(env);
+        }
+        player
+    }
+}
+
+fn set_player_data(env: &Env, player_id: u64, player: &PlayerData) {
+    let key = DataKey::Player(player_id);
+    env.storage().persistent().set(&key, player);
+    env.storage().persistent().extend_ttl(
+        &key,
+        LEDGER_LIFETIME_THRESHOLD,
+        LEDGER_BUMP_AMOUNT,
+    );
+}
+
+fn wallet_is_registered(env: &Env, wallet: &Address) -> bool {
+    let key = DataKey::Wallet(wallet.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().extend_ttl(
+            &key,
+            LEDGER_LIFETIME_THRESHOLD,
+            LEDGER_BUMP_AMOUNT,
+        );
+        true
+    } else if env.storage().instance().has(&key) {
+        bump_instance(env);
+        true
+    } else {
+        false
+    }
+}
+
+fn set_wallet_player_id(env: &Env, wallet: &Address, player_id: u64) {
+    let key = DataKey::Wallet(wallet.clone());
+    env.storage().persistent().set(&key, &player_id);
+    env.storage().persistent().extend_ttl(
+        &key,
+        LEDGER_LIFETIME_THRESHOLD,
+        LEDGER_BUMP_AMOUNT,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -80,9 +141,7 @@ impl RegisterContract {
             .instance()
             .set(&DataKey::PlatformFeeBps, &platform_fee_bps);
         env.storage().instance().set(&DataKey::Counter, &0u64);
-        env.storage()
-            .instance()
-            .set(&DataKey::PlayerList, &Vec::<u64>::new(&env));
+        env.storage().instance().set(&DataKey::PlayerDataMigrated, &true);
         set_initialized(&env);
         bump_instance(&env);
         Ok(())
@@ -208,11 +267,7 @@ impl RegisterContract {
         }
         wallet.require_auth();
 
-        if env
-            .storage()
-            .instance()
-            .has(&DataKey::Wallet(wallet.clone()))
-        {
+        if wallet_is_registered(&env, &wallet) {
             return Err(Error::InvalidInput);
         }
 
@@ -233,20 +288,8 @@ impl RegisterContract {
             created_at: env.ledger().timestamp(),
         };
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Player(player_id), &player);
-        env.storage()
-            .instance()
-            .set(&DataKey::Wallet(wallet.clone()), &player_id);
-
-        let mut list: Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&DataKey::PlayerList)
-            .unwrap_or_else(|| Vec::new(&env));
-        list.push_back(player_id);
-        env.storage().instance().set(&DataKey::PlayerList, &list);
+        set_player_data(&env, player_id, &player);
+        set_wallet_player_id(&env, &wallet, player_id);
 
         env.events().publish(
             (symbol_short!("player_rg"), wallet),
@@ -270,11 +313,7 @@ impl RegisterContract {
             return Err(Error::NotInitialized);
         }
 
-        let mut player: PlayerData = match env
-            .storage()
-            .instance()
-            .get(&DataKey::Player(player_id))
-        {
+        let mut player: PlayerData = match get_player_data(&env, player_id) {
             Some(p) => p,
             None => return Err(Error::PlayerNotFound),
         };
@@ -282,19 +321,121 @@ impl RegisterContract {
         player.wallet.require_auth();
         player.metadata_uri = metadata_uri;
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Player(player_id), &player);
+        set_player_data(&env, player_id, &player);
+        env.storage().instance().remove(&DataKey::Player(player_id));
         bump_instance(&env);
         Ok(())
     }
 
     /// Retrieve a player's full profile, including current progress tier.
     pub fn get_player(env: Env, player_id: u64) -> Result<PlayerData, Error> {
-        env.storage()
+        get_player_data(&env, player_id).ok_or(Error::PlayerNotFound)
+    }
+
+    /// Return the sequential on-chain player ID assigned to `wallet`.
+    ///
+    /// Supports both persistent records and legacy instance records so
+    /// operators can backfill API player mappings during an upgrade.
+    pub fn get_player_id(env: Env, wallet: Address) -> Option<u64> {
+        let key = DataKey::Wallet(wallet);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(
+                &key,
+                LEDGER_LIFETIME_THRESHOLD,
+                LEDGER_BUMP_AMOUNT,
+            );
+            env.storage().persistent().get(&key)
+        } else {
+            let player_id = env.storage().instance().get(&key);
+            if player_id.is_some() {
+                bump_instance(&env);
+            }
+            player_id
+        }
+    }
+
+    /// Migrate legacy instance-stored player records into persistent storage.
+    ///
+    /// Admins should call this repeatedly until it returns `true`. Each call
+    /// processes at most 100 sequential player IDs, so large deployments can
+    /// migrate without a single unbounded transaction. New registrations are
+    /// already written to persistent storage while migration is in progress.
+    pub fn migrate_players(env: Env, limit: u32) -> Result<bool, Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        if limit == 0 || limit > MAX_PLAYER_MIGRATION_BATCH {
+            return Err(Error::InvalidInput);
+        }
+
+        let admin: Address = env
+            .storage()
             .instance()
-            .get(&DataKey::Player(player_id))
-            .ok_or(Error::PlayerNotFound)
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::PlayerDataMigrated)
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+
+        // Filtering now walks the sequential counter, so the legacy growing
+        // list can be removed before processing the bounded player batches.
+        env.storage().instance().remove(&DataKey::PlayerList);
+
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Counter)
+            .unwrap_or(0);
+        let mut cursor: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlayerMigrationCursor)
+            .unwrap_or(1);
+        let mut processed = 0;
+        let mut complete = counter == 0;
+
+        while cursor <= counter && processed < limit {
+            if let Some(player) = get_player_data(&env, cursor) {
+                set_player_data(&env, cursor, &player);
+                set_wallet_player_id(&env, &player.wallet, cursor);
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::Player(cursor));
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::Wallet(player.wallet));
+            }
+
+            processed += 1;
+            if cursor == counter {
+                complete = true;
+                break;
+            }
+            cursor += 1;
+        }
+
+        if complete {
+            env.storage()
+                .instance()
+                .remove(&DataKey::PlayerMigrationCursor);
+            env.storage()
+                .instance()
+                .set(&DataKey::PlayerDataMigrated, &true);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::PlayerMigrationCursor, &cursor);
+        }
+
+        bump_instance(&env);
+        Ok(complete)
     }
 
     // ── Multi-writer authorization ────────────────────────────────────────
@@ -426,15 +567,11 @@ impl RegisterContract {
             return Err(Error::Unauthorized);
         }
 
-        let mut player: PlayerData = env
-            .storage()
-            .instance()
-            .get(&DataKey::Player(player_id))
-            .ok_or(Error::PlayerNotFound)?;
+        let mut player: PlayerData =
+            get_player_data(&env, player_id).ok_or(Error::PlayerNotFound)?;
         player.progress_level = player.progress_level.max(level);
-        env.storage()
-            .instance()
-            .set(&DataKey::Player(player_id), &player);
+        set_player_data(&env, player_id, &player);
+        env.storage().instance().remove(&DataKey::Player(player_id));
         bump_instance(&env);
         Ok(())
     }
@@ -446,20 +583,14 @@ impl RegisterContract {
         position: String,
         min_tier: u32,
     ) -> Vec<PlayerData> {
-        let list: Vec<u64> = match env.storage().instance().get(&DataKey::PlayerList) {
-            Some(l) => l,
-            None => return Vec::new(&env),
-        };
-
         let mut results = Vec::new(&env);
-        let len = list.len();
-        for i in 0..len {
-            let player_id = list.get_unchecked(i);
-            if let Some(player) = env
-                .storage()
-                .instance()
-                .get::<DataKey, PlayerData>(&DataKey::Player(player_id))
-            {
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Counter)
+            .unwrap_or(0);
+        for player_id in 1..=counter {
+            if let Some(player) = get_player_data(&env, player_id) {
                 if player.region == region
                     && player.position == position
                     && player.progress_level >= min_tier
@@ -509,6 +640,121 @@ mod tests {
         assert_eq!(player.wallet, wallet);
         assert_eq!(player.position, String::from_str(&env, "forward"));
         assert_eq!(player.region, String::from_str(&env, "europe"));
+    }
+
+    #[test]
+    fn player_and_wallet_records_use_persistent_storage() {
+        let env = Env::default();
+        let id = env.register_contract(None, RegisterContract);
+        let client = RegisterContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token, &100);
+
+        let wallet = Address::generate(&env);
+        let player_id = client.register_player(
+            &wallet,
+            &String::from_str(&env, "ipfs://meta"),
+            &String::from_str(&env, "forward"),
+            &String::from_str(&env, "europe"),
+        );
+
+        env.as_contract(&id, || {
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&DataKey::Player(player_id)));
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&DataKey::Wallet(wallet.clone())));
+            assert!(!env.storage().instance().has(&DataKey::Player(player_id)));
+            assert!(!env
+                .storage()
+                .instance()
+                .has(&DataKey::Wallet(wallet.clone())));
+            assert!(!env.storage().instance().has(&DataKey::PlayerList));
+        });
+    }
+
+    #[test]
+    fn migrate_players_moves_legacy_records_in_bounded_batches() {
+        let env = Env::default();
+        let id = env.register_contract(None, RegisterContract);
+        let client = RegisterContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token, &100);
+
+        let first_wallet = Address::generate(&env);
+        let second_wallet = Address::generate(&env);
+        let legacy_player = |wallet: Address| PlayerData {
+            wallet,
+            metadata_uri: String::from_str(&env, "ipfs://legacy"),
+            position: String::from_str(&env, "forward"),
+            region: String::from_str(&env, "europe"),
+            progress_level: 1,
+            created_at: 10,
+        };
+
+        env.as_contract(&id, || {
+            env.storage().instance().set(&DataKey::Counter, &2u64);
+            env.storage()
+                .instance()
+                .set(&DataKey::PlayerDataMigrated, &false);
+            env.storage().instance().set(
+                &DataKey::PlayerList,
+                &Vec::from_array(&env, [1u64, 2u64]),
+            );
+            env.storage()
+                .instance()
+                .set(&DataKey::Player(1), &legacy_player(first_wallet.clone()));
+            env.storage()
+                .instance()
+                .set(&DataKey::Player(2), &legacy_player(second_wallet.clone()));
+            env.storage()
+                .instance()
+                .set(&DataKey::Wallet(first_wallet.clone()), &1u64);
+            env.storage()
+                .instance()
+                .set(&DataKey::Wallet(second_wallet.clone()), &2u64);
+        });
+
+        assert!(!client.migrate_players(&1));
+        assert_eq!(client.get_player(&1).wallet, first_wallet);
+        env.as_contract(&id, || {
+            assert!(!env.storage().instance().has(&DataKey::PlayerList));
+            assert!(!env.storage().instance().has(&DataKey::Player(1)));
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&DataKey::Player(1)));
+        });
+        assert!(!client.migrate_players(&1));
+        assert_eq!(client.get_player(&2).wallet, second_wallet);
+        assert!(client.migrate_players(&1));
+
+        env.as_contract(&id, || {
+            assert!(!env.storage().instance().has(&DataKey::Player(1)));
+            assert!(!env.storage().instance().has(&DataKey::Player(2)));
+            assert!(!env.storage().instance().has(&DataKey::PlayerList));
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&DataKey::Player(1)));
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&DataKey::Player(2)));
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&DataKey::Wallet(first_wallet.clone())));
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&DataKey::Wallet(second_wallet.clone())));
+        });
     }
 
     #[test]

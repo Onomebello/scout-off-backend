@@ -213,6 +213,7 @@ export type ContractEventType =
   | 'milestone_rejected'
   | 'scout_subscribed'
   | 'contact_unlocked'
+  | 'connection_created'
   | 'trial_offer_logged'
   | 'trial_offer_accepted'
   | 'trial_offer_rejected'
