@@ -116,6 +116,24 @@ TTL. Resubmitting the identical signed challenge — e.g. one captured via a
 compromised client or a leaked request log — is rejected with `Challenge has
 already been used` (#693) instead of minting another token.
 
+## SEP-10 Validation Rules
+
+The `verifyAndIssueToken` function enforces the following SEP-10 requirements:
+
+1. **Source Account** — The transaction source account must match the server's public key.
+2. **Sequence Number** — Must be `0` (the challenge is built from sequence `-1`).
+3. **Time Bounds** — Must be present with valid values:
+   - `minTime` must not be in the future (with a 60-second grace window for clock skew)
+   - `maxTime` must not have passed (challenge expired)
+4. **Operations** — Every operation must be of type `manageData`:
+   - The first operation must have name `scoutoff auth`
+   - The first operation's value must be exactly 64 bytes (the nonce)
+   - The first operation must have the client account as its source
+   - Any additional operations (e.g., `web_auth_domain`) must be sourced by the server account
+5. **Signatures** — Both the server and client must have signed the transaction
+
+Invalid challenges return `401 Unauthorized`. Malformed XDR or other protocol-level errors return `400 Bad Request`.
+
 ## JWT Claims Structure
 
 The backend issues JWTs with the following standard claims:

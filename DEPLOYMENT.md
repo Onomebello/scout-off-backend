@@ -29,6 +29,32 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 > [!NOTE]
 > For instructions and policies on managing, securing, and rotating long-lived secrets (such as JWT secrets, Pinata credentials, and platform signing keys), see the [Secrets Rotation Policy](docs/secrets-rotation.md).
 
+### Network Configuration
+
+The `NETWORK` environment variable determines which Stellar network the backend connects to. Accepted values:
+
+| Value | Description | Use Case |
+|-------|-------------|----------|
+| `testnet` | Test SDF Network | Development, testing |
+| `mainnet` | Public Global Stellar Network | Production |
+| `futurenet` | Test SDF Future Network | Testing upcoming protocol changes |
+| `standalone` | Standalone Network | Local development with Soroban sandbox |
+
+Default: `testnet`.
+
+When `NETWORK_PASSPHRASE` is unset, the server uses the default passphrase for the selected network. Override `NETWORK_PASSPHRASE` only when using non-standard networks.
+
+For local development with the Soroban sandbox, use:
+```env
+NETWORK=standalone
+NETWORK_PASSPHRASE=Standalone Network ; February 2017
+```
+
+The sandbox can be started with `scripts/soroban-sandbox` (see [scripts/soroban-sandbox](scripts/soroban-sandbox)).
+
+> [!IMPORTANT]
+> In production, **always** set `NETWORK=mainnet`. Deployments using `testnet`, `futurenet`, or `standalone` in production emit a startup warning.
+
 | Variable | Required | Notes |
 |---|---|---|
 | `CONTRACT_ID` | — | Legacy single-contract address (backward compat). Falls back as default for each per-contract var below. |
@@ -42,7 +68,7 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `SEP10_SERVER_SECRET` | ✅ | Stellar secret key (starts with `S`) used to sign and verify SEP-10 challenge transactions. **Must be identical across every backend instance** — without it each process generates an ephemeral random keypair, causing cross-instance auth failures under a load balancer. Generate with `stellar keys generate` and store in your secrets manager. See [docs/auth.md](docs/auth.md#sep-10-server-keypair-sep10_server_secret) for rotation guidance. |
 | `HORIZON_URL` | ✅ | e.g. `https://horizon-testnet.stellar.org` |
 | `SOROBAN_RPC_URL` | ✅ | e.g. `https://soroban-testnet.stellar.org` |
-| `NETWORK` | ✅ | `testnet` or `mainnet` |
+| `NETWORK` | ✅ | `testnet`, `mainnet`, `futurenet`, or `standalone` (see below) |
 | `PINATA_API_KEY` / `PINATA_SECRET` | ✅ | IPFS upload credentials |
 | `DB_DRIVER` | — | Database driver: `sqlite` (default) or `postgres` |
 | `DB_PATH` | — | SQLite file path (default: `scout-off.db`); only used when `DB_DRIVER=sqlite` |

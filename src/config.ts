@@ -179,16 +179,68 @@ const corsAllowedOrigins =
     ? rawCorsOrigins.split(',').map((o) => o.trim()).filter(Boolean)
     : DEFAULT_CORS_ORIGINS[nodeEnv];
 
+// Validate NETWORK and derive networkPassphrase with defaults per network type.
+// Acceptable network values: 'testnet', 'mainnet', 'futurenet', 'standalone'.
+// Default passphrases follow Stellar's convention for each network type.
+const VALID_NETWORKS: ReadonlySet<string> = new Set(['testnet', 'mainnet', 'futurenet', 'standalone']);
+
+const rawNetwork = process.env.NETWORK ?? 'testnet';
+if (!VALID_NETWORKS.has(rawNetwork)) {
+  throw new Error(
+    `Invalid NETWORK: "${rawNetwork}". Must be one of: ${[...VALID_NETWORKS].join(', ')}. ` +
+    `Set NETWORK to a valid value or remove it to use the default (testnet).`,
+  );
+}
+const network = rawNetwork as 'testnet' | 'mainnet' | 'futurenet' | 'standalone';
+
+// Default passphrases per network type
+const DEFAULT_PASSPHRASES: Record<string, string> = {
+  testnet: 'Test SDF Network ; September 2015',
+  mainnet: 'Public Global Stellar Network ; September 2015',
+  futurenet: 'Test SDF Future Network ; October 2022',
+  standalone: 'Standalone Network ; February 2017',
+};
+
+const rawNetworkPassphrase = process.env.NETWORK_PASSPHRASE;
+const networkPassphrase = rawNetworkPassphrase ?? DEFAULT_PASSPHRASES[network];
+
+// Log the effective network and passphrase on startup for visibility
+console.log(
+  `[config] Network: ${network}`,
+  rawNetworkPassphrase ? '' : '(default)',
+  `Passphrase: "${networkPassphrase}"`,
+  rawNetworkPassphrase ? '' : '(default)',
+);
+
+// Validate NETWORK_PASSPHRASE is present (though we have defaults, explicit override should be set)
+if (!rawNetworkPassphrase && network === 'standalone') {
+  // For standalone, always require explicit passphrase to avoid misconfiguration
+  throw new Error(
+    'NETWORK_PASSPHRASE must be set when NETWORK=standalone. ' +
+    'For the local Soroban sandbox, set: NETWORK_PASSPHRASE="Standalone Network ; February 2017"',
+  );
+}
+
+// Guard: production with NETWORK != mainnet emits a warning
+// This helps catch accidental testnet/futurenet usage in production
+if (nodeEnv === 'production' && network !== 'mainnet') {
+  console.warn(
+    `[config] WARNING: Production deployment using ${network}. ` +
+    `This is not recommended for production. Set NETWORK=mainnet to suppress this warning.`,
+  );
+}
+
 const config = {
   nodeEnv,
   port: parseNumericEnv('PORT', process.env.PORT, 4000, { min: 0, max: 65535, integer: true }),
-  network: (process.env.NETWORK ?? 'testnet') as 'testnet' | 'mainnet',
-  networkPassphrase:
-    process.env.NETWORK_PASSPHRASE ?? 'Test SDF Network ; September 2015',
+  network,
+  networkPassphrase,
   horizonUrl:
-    process.env.HORIZON_URL ?? 'https://horizon-testnet.stellar.org',
+    process.env.HORIZON_URL ??
+    (network === 'mainnet' ? 'https://horizon.stellar.org' : 'https://horizon-testnet.stellar.org'),
   sorobanRpcUrl:
-    process.env.SOROBAN_RPC_URL ?? 'https://soroban-testnet.stellar.org',
+    process.env.SOROBAN_RPC_URL ??
+    (network === 'mainnet' ? 'https://sorobanrpc.stellar.org' : 'https://soroban-testnet.stellar.org'),
   /**
    * Legacy single-contract ID — kept for backward compatibility with any code
    * that has not yet been migrated to the per-contract IDs below.
@@ -565,6 +617,15 @@ const config = {
     intervalMs: parseNumericEnv('TIER_DIVERGENCE_INTERVAL_MS', process.env.TIER_DIVERGENCE_INTERVAL_MS, 300_000, { min: 1000, integer: true }),
     sampleSize: parseNumericEnv('TIER_DIVERGENCE_SAMPLE_SIZE', process.env.TIER_DIVERGENCE_SAMPLE_SIZE, 100, { min: 1, integer: true }),
   },
+
+  /**
+   * Web authentication domain for SEP-10 web_auth_domain operation.
+   * When set, the SEP-10 challenge will include a server-sourced manageData
+   * operation with name 'web_auth_domain' and value set to this domain.
+   * This is optional per SEP-10 and is used for web-based authentication flows.
+   * See docs/auth.md for details.
+   */
+  webAuthDomain: process.env.WEB_AUTH_DOMAIN ?? '',
 
 };
 
