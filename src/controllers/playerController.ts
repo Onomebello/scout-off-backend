@@ -38,6 +38,7 @@ import { playerIdSchema } from "../utils/playerIdValidator";
 import { recordAudit } from "../utils/audit";
 import { canAccessPlayer } from "../utils/playerAccess";
 import { MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE } from "../utils/pagination";
+import { logger } from "../utils/logger";
 
 const baseRegistrationSchema = z.object({
   wallet: z.string().min(56).max(56),
@@ -122,12 +123,18 @@ export async function registerPlayer(
     registered_at: now,
   });
 
-  await dispatchEventWebhook("player_registered", {
+  void dispatchEventWebhook("player_registered", {
     player_id: playerId,
     wallet: parsed.wallet,
     position: canonicalPosition,
     region: sanitizedRegion,
     metadataUri,
+  }).catch((err: unknown) => {
+    logger.warn(
+      `[players] registration webhook failed player=${playerId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   });
 
   const ipfsResult = serializeIpfsResult(metadataUri, {
