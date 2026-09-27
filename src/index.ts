@@ -93,52 +93,39 @@ async function startServer() {
     })();
   });
 
-  // Poll for new contract events every 5 seconds
-  const poll = async () => {
-    try {
-      await indexEvents();
-    } catch (err) {
-      logger.error("Indexer error:", (err as Error).message);
-    }
+  const runBackgroundTask = (
+    label: string,
+    task: () => Promise<unknown>,
+  ): (() => void) => () => {
+    void task().catch((err: unknown) => {
+      logger.error(label, err instanceof Error ? err.message : String(err));
+    });
   };
 
+  // Poll for new contract events every 5 seconds
+  const poll = runBackgroundTask("Indexer error:", indexEvents);
   poll();
   const pollInterval = setInterval(poll, 5_000);
 
   // Poll for IPFS retries every 30 seconds
-  const retryPins = async () => {
-    try {
-      await retryPendingPins();
-    } catch (err) {
-      logger.error("IPFS retry worker error:", (err as Error).message);
-    }
-  };
-
+  const retryPins = runBackgroundTask("IPFS retry worker error:", retryPendingPins);
   const retryInterval = setInterval(retryPins, 30_000);
 
   // Scheduled reconciliation of pending pins against Pinata & IPFS gateways
-  const reconcilePins = async () => {
-    try {
-      await reconcilePendingPins();
-    } catch (err) {
-      logger.error("IPFS reconcile worker error:", (err as Error).message);
-    }
-  };
-
+  const reconcilePins = runBackgroundTask(
+    "IPFS reconcile worker error:",
+    reconcilePendingPins,
+  );
   reconcilePins();
   const reconcileInterval = setInterval(reconcilePins, config.ipfsReconcileIntervalMs);
 
   // Scheduled tier divergence check (#1132): compare derived (off-chain) tier
   // against stored progress_level; emits scout_off_tier_divergence_total metric
   // and structured log per mismatch. Interval configurable via TIER_DIVERGENCE_INTERVAL_MS.
-  const runDivergenceCheck = async () => {
-    try {
-      await runTierDivergenceCheck();
-    } catch (err) {
-      logger.error("Tier divergence check error:", (err as Error).message);
-    }
-  };
-
+  const runDivergenceCheck = runBackgroundTask(
+    "Tier divergence check error:",
+    runTierDivergenceCheck,
+  );
   runDivergenceCheck();
   const divergenceInterval = setInterval(runDivergenceCheck, config.tierDivergence.intervalMs);
 

@@ -207,7 +207,7 @@ try {
 
     // Rotate: revoke old refresh token jti immediately.
     const expiresAtSeconds = payload.exp ?? Math.floor(Date.now() / 1000) + config.jwtRefreshTtlSeconds;
-    revokeToken(jti, expiresAtSeconds);
+    await revokeToken(jti, expiresAtSeconds);
 
     // Issue new pair.
     const { token: newAccessToken, expiresAt } = issueAccessToken(account, role ?? 'player');
@@ -236,7 +236,7 @@ export const logoutSchema = z.object({
  * Revokes the caller's access token jti (from the bearer header) and,
  * if a refreshToken body param is provided, its jti too.
  */
-export function postLogout(req: Request, res: Response, next: NextFunction): void {
+export async function postLogout(req: Request, res: Response, next: NextFunction): Promise<void> {
 try {
     // The access token is already verified by requireAuth middleware.
     // We need to revoke its jti.
@@ -244,27 +244,24 @@ try {
     const rawAccessToken = header.startsWith('Bearer ') ? header.slice(7) : '';
 
     if (rawAccessToken) {
-      try {
-        const decoded = jwt.decode(rawAccessToken) as jwt.JwtPayload | null;
-        if (decoded?.jti && decoded.exp) {
-          revokeToken(decoded.jti, decoded.exp);
-        }
-      } catch {
-        // Best-effort — don't fail the logout
+      const decoded = jwt.decode(rawAccessToken) as jwt.JwtPayload | null;
+      if (decoded?.jti && decoded.exp) {
+        await revokeToken(decoded.jti, decoded.exp);
       }
     }
 
     // Optionally revoke the refresh token too.
     const parsed = logoutSchema.safeParse(req.body);
     if (parsed.success && parsed.data.refreshToken) {
+      let rtPayload: jwt.JwtPayload | undefined;
       try {
-        const rtPayload = verifyJwt(parsed.data.refreshToken);
-        if (rtPayload.jti && rtPayload.exp && rtPayload.type === 'refresh') {
-          revokeToken(rtPayload.jti, rtPayload.exp);
-        }
+        rtPayload = verifyJwt(parsed.data.refreshToken);
       } catch {
         // Invalid refresh token on logout — that's fine, just ignore it.
         logger.debug('[auth] logout: could not verify refresh token (already expired or invalid)');
+      }
+      if (rtPayload?.jti && rtPayload.exp && rtPayload.type === 'refresh') {
+        await revokeToken(rtPayload.jti, rtPayload.exp);
       }
     }
 
