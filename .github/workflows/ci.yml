@@ -296,6 +296,16 @@ jobs:
             --tag scout-off-backend:ci \
             .
 
+      - name: Scan Docker image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: scout-off-backend:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+
       - name: Verify GIT_COMMIT is set in the image
         run: |
           commit=$(docker run --rm \
