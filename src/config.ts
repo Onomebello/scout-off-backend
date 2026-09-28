@@ -434,6 +434,8 @@ const config = {
   subscriptionGracePeriodHours: parseNumericEnv('SUBSCRIPTION_GRACE_PERIOD_HOURS', process.env.SUBSCRIPTION_GRACE_PERIOD_HOURS, 24, { min: 0, integer: true }),
   /** Global request timeout in milliseconds before the server responds with 503. */
   requestTimeoutMs: parseNumericEnv('REQUEST_TIMEOUT_MS', process.env.REQUEST_TIMEOUT_MS, 30000, { min: 1, integer: true }),
+  /** Lease expiry for pending idempotency claims (ms). A crashed request releases its claim after this window. */
+  idempotencyLeaseMs: parseNumericEnv('IDEMPOTENCY_LEASE_MS', process.env.IDEMPOTENCY_LEASE_MS, 35000, { min: 1000, integer: true }),
   /**
    * Bounded Soroban transaction-confirmation poll window (ms). When a
    * submitted pay_to_contact/subscribe transaction has not reached a final
