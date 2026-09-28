@@ -515,6 +515,7 @@ const config = {
 
   /** Maximum evidence file size in bytes (default: 50 MB). */
   evidenceMaxBytes: parseNumericEnv('EVIDENCE_MAX_BYTES', process.env.EVIDENCE_MAX_BYTES, 50 * 1024 * 1024, { min: 1, integer: true }),
+  evidenceValidatorBytesPerHour: parseNumericEnv('EVIDENCE_VALIDATOR_BYTES_PER_HOUR', process.env.EVIDENCE_VALIDATOR_BYTES_PER_HOUR, 500 * 1024 * 1024, { min: 1, integer: true }),
 
   /** TTL for multi-admin action proposals in milliseconds (default: 1 hour). */
   adminActionTtlMs: parseNumericEnv('ADMIN_ACTION_TTL_MS', process.env.ADMIN_ACTION_TTL_MS, 3600000, { min: 1, integer: true }),
