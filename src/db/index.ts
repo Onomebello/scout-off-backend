@@ -2709,80 +2709,21 @@ function normalizeFeatureFlags(rows: FeatureFlagRow[]): FeatureFlagRow[] {
 
 // ─── Multi-admin action helpers ───────────────────────────────────────────────
 
-export interface PendingAdminActionRow {
-  id: string;
-  action_type: string;
-  proposer: string;
-  payload: string;
-  required_signatures: number;
-  collected_signatures: number;
-  status: string;
-  expires_at: number;
-  created_at: number;
-}
-
-export async function insertPendingAdminAction(p: {
-  id: string;
-  action_type: string;
-  proposer: string;
-  payload: string;
-  required_signatures: number;
-  expires_at: number;
-  created_at: number;
-}): Promise<void> {
-  const sql = `INSERT INTO pending_admin_actions (id, action_type, proposer, payload, required_signatures, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`;
-  await timedQueryAsync(sql, () => getDriver().run(sql, [p.id, p.action_type, p.proposer, p.payload, p.required_signatures, p.expires_at, p.created_at]));
-}
-
-export async function getPendingAdminActionById(id: string): Promise<PendingAdminActionRow | null> {
-  const sql = `SELECT * FROM pending_admin_actions WHERE id = ?`;
-  return timedQueryAsync(sql, async () =>
-    (await getDriver().get<PendingAdminActionRow>(sql, [id])) ?? null
-  );
-}
-
-export async function getPendingAdminActionsByStatus(status: string): Promise<PendingAdminActionRow[]> {
-  const sql = `SELECT * FROM pending_admin_actions WHERE status = ? ORDER BY created_at DESC`;
-  return timedQueryAsync(sql, () => getDriver().all<PendingAdminActionRow>(sql, [status]));
-}
-
-export async function updatePendingAdminActionStatus(id: string, status: string): Promise<void> {
-  const sql = `UPDATE pending_admin_actions SET status = ? WHERE id = ?`;
-  await timedQueryAsync(sql, () => getDriver().run(sql, [status, id]));
-}
-
-export async function incrementActionSignatures(id: string): Promise<void> {
-  const sql = `UPDATE pending_admin_actions SET collected_signatures = collected_signatures + 1 WHERE id = ?`;
-  await timedQueryAsync(sql, () => getDriver().run(sql, [id]));
-}
-
-export async function expireStalePendingAdminActions(): Promise<number> {
-  const sql = `UPDATE pending_admin_actions SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?`;
-  const info = await timedQueryAsync(sql, () => getDriver().run(sql, [Date.now()]));
-  return info.changes;
-}
-
-export async function insertAdminActionSignature(p: {
-  action_id: string;
-  signer: string;
-  signed_at: number;
-}): Promise<boolean> {
-  const sql = `INSERT INTO admin_action_signatures (action_id, signer, signed_at) VALUES (?, ?, ?) ON CONFLICT (action_id, signer) DO NOTHING`;
-  const info = await timedQueryAsync(sql, () => getDriver().run(sql, [p.action_id, p.signer, p.signed_at]));
-  return info.changes > 0;
-}
-
-export async function getAdminActionSignature(action_id: string, signer: string): Promise<{ signed_at: number } | null> {
-  const sql = `SELECT signed_at FROM admin_action_signatures WHERE action_id = ? AND signer = ?`;
-  return timedQueryAsync(sql, async () =>
-    (await getDriver().get<{ signed_at: number }>(sql, [action_id, signer])) ?? null
-  );
-}
-
-export async function getAdminActionSignatures(action_id: string): Promise<{ signer: string; signed_at: number }[]> {
-  const sql = `SELECT signer, signed_at FROM admin_action_signatures WHERE action_id = ? ORDER BY signed_at ASC`;
-  return timedQueryAsync(sql, () => getDriver().all<{ signer: string; signed_at: number }>(sql, [action_id]));
-}
+// ─── Multi-admin action helpers ───────────────────────────────────────────────
+// Moved to src/db/repositories/adminActions.ts (#1322). Re-exported here for
+// backward compatibility — new code should import directly from the repository.
+export {
+  PendingAdminActionRow,
+  insertPendingAdminAction,
+  getPendingAdminActionById,
+  getPendingAdminActionsByStatus,
+  updatePendingAdminActionStatus,
+  incrementActionSignatures,
+  expireStalePendingAdminActions,
+  insertAdminActionSignature,
+  getAdminActionSignature,
+  getAdminActionSignatures,
+} from './repositories/adminActions';
 
 // ─── Webhook subscriptions (#470) ────────────────────────────────────────────
 //
@@ -3065,80 +3006,17 @@ export function purgeOldWebhookDeadLetters(cutoffDays: number): number {
 }
 
 // ─── Fee withdrawal helpers (#fee-withdrawal) ────────────────────────────────
-
-export interface FeeWithdrawalRow {
-  id: number;
-  idempotency_key: string | null;
-  treasury_address: string;
-  amount_stroops: string;
-  tx_hash: string;
-  admin_wallet: string;
-  created_at: string;
-}
-
-/**
- * Insert a confirmed fee withdrawal record.
- * The UNIQUE constraint on `tx_hash` prevents duplicate rows for the same
- * on-chain transaction; the UNIQUE constraint on `idempotency_key` provides
- * a storage-layer guard against double-submission at the DB level (the HTTP
- * idempotency middleware is the primary gate, but belts-and-suspenders here
- * is valuable for audit integrity).
- *
- * Returns the new row id.
- */
-export async function insertFeeWithdrawal(p: {
-  idempotencyKey: string | null;
-  treasuryAddress: string;
-  amountStroops: string;
-  txHash: string;
-  adminWallet: string;
-  createdAt: string;
-}): Promise<number> {
-  const sql = `
-    INSERT INTO fee_withdrawals
-      (idempotency_key, treasury_address, amount_stroops, tx_hash, admin_wallet, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-    RETURNING id
-  `;
-  return timedQueryAsync(sql, async () => {
-    const info = await getDriver().run(sql, [
-      p.idempotencyKey ?? null,
-      p.treasuryAddress,
-      p.amountStroops,
-      p.txHash,
-      p.adminWallet,
-      p.createdAt,
-    ]);
-    return info.lastId;
-  });
-}
-
-/**
- * Look up a fee withdrawal by idempotency key.
- * Returns null when no record exists for the given key, so callers can
- * distinguish "never submitted" from "already submitted".
- */
-export async function getFeeWithdrawalByIdempotencyKey(key: string): Promise<FeeWithdrawalRow | null> {
-  const sql = `SELECT * FROM fee_withdrawals WHERE idempotency_key = ? LIMIT 1`;
-  return timedQueryAsync(sql, async () =>
-    (await getDriver().get<FeeWithdrawalRow>(sql, [key])) ?? null,
-  );
-}
-
-/**
- * Return the most recent fee_withdrawals rows, newest-first.
- * Used by GET /api/admin/fees to show withdrawal history.
- */
-export async function listFeeWithdrawals(limit = 50, offset = 0): Promise<FeeWithdrawalRow[]> {
-  const sql = `
-    SELECT * FROM fee_withdrawals
-    ORDER BY created_at DESC
-    LIMIT ? OFFSET ?
-  `;
-  return timedQueryAsync(sql, () =>
-    getDriver().all<FeeWithdrawalRow>(sql, [limit, offset]),
-  );
-}
+// Moved to src/db/repositories/feeWithdrawals.ts (#1322). Re-exported here for
+// backward compatibility — new code should import directly from the repository.
+export {
+  FeeWithdrawalRow,
+  insertFeeWithdrawal,
+  getFeeWithdrawalByIdempotencyKey,
+  listFeeWithdrawals,
+  AdminFeeConfigLogRow,
+  insertAdminFeeConfigLog,
+  listAdminFeeConfigLog,
+} from './repositories/feeWithdrawals';
 
 // ─── Webhook delivery history (#1121) ─────────────────────────────────────────
 

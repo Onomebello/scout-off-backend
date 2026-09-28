@@ -1,7 +1,7 @@
 import { initTracing, shutdownTracing } from "./tracing";
 initTracing();
 
-import app from "./app";
+import app, { setDraining } from "./app";
 import config from "./config";
 import { logger } from "./utils/logger";
 import { initDb, closeDb } from "./db";
@@ -19,6 +19,8 @@ import { closeRedisClients } from "./services/redis";
 import { runTierDivergenceCheck } from "./services/tierDivergenceJob";
 import { getTierDivergenceTotal } from "./services/tierDivergenceJob";
 import { setTierDivergenceGetter } from "./middleware/metrics";
+import { drainAllSessions, setAcceptingSseSessions } from "./routes/events";
+import http from "http";
 
 // Database initialization is now async - must be awaited
 async function start() {
@@ -93,37 +95,53 @@ async function startServer() {
     })();
   });
 
+  // ── Job tracking ──────────────────────────────────────────────────────────
+  // Wraps each background job so shutdown can observe whether one is running
+  // and wait for it to complete before closing the DB.
+  let inFlightJobs = 0;
+
+  function withJobTracking(fn: () => Promise<void>): () => Promise<void> {
+    return async () => {
+      inFlightJobs++;
+      try {
+        await fn();
+      } finally {
+        inFlightJobs--;
+      }
+    };
+  }
+
   // Poll for new contract events every 5 seconds
-  const poll = async () => {
+  const poll = withJobTracking(async () => {
     try {
       await indexEvents();
     } catch (err) {
       logger.error("Indexer error:", (err as Error).message);
     }
-  };
+  });
 
   poll();
   const pollInterval = setInterval(poll, 5_000);
 
   // Poll for IPFS retries every 30 seconds
-  const retryPins = async () => {
+  const retryPins = withJobTracking(async () => {
     try {
       await retryPendingPins();
     } catch (err) {
       logger.error("IPFS retry worker error:", (err as Error).message);
     }
-  };
+  });
 
   const retryInterval = setInterval(retryPins, 30_000);
 
   // Scheduled reconciliation of pending pins against Pinata & IPFS gateways
-  const reconcilePins = async () => {
+  const reconcilePins = withJobTracking(async () => {
     try {
       await reconcilePendingPins();
     } catch (err) {
       logger.error("IPFS reconcile worker error:", (err as Error).message);
     }
-  };
+  });
 
   reconcilePins();
   const reconcileInterval = setInterval(reconcilePins, config.ipfsReconcileIntervalMs);
@@ -131,24 +149,52 @@ async function startServer() {
   // Scheduled tier divergence check (#1132): compare derived (off-chain) tier
   // against stored progress_level; emits scout_off_tier_divergence_total metric
   // and structured log per mismatch. Interval configurable via TIER_DIVERGENCE_INTERVAL_MS.
-  const runDivergenceCheck = async () => {
+  const runDivergenceCheck = withJobTracking(async () => {
     try {
       await runTierDivergenceCheck();
     } catch (err) {
       logger.error("Tier divergence check error:", (err as Error).message);
     }
-  };
+  });
 
   runDivergenceCheck();
   const divergenceInterval = setInterval(runDivergenceCheck, config.tierDivergence.intervalMs);
 
-  const SHUTDOWN_TIMEOUT_MS = 10_000;
+  // ── Graceful shutdown ──────────────────────────────────────────────────────
+  // Ordered drain sequence (#1315):
+  //   1. Flip draining flag  → readiness returns 503 immediately
+  //   2. Optional pre-stop delay (SHUTDOWN_PRESTOP_DELAY_MS)
+  //   3. Stop schedulers     → no new jobs start
+  //   4. Await in-flight jobs (bounded to 60 % of total timeout)
+  //   5. Drain SSE sessions  → send session_ended(server_shutdown) and end each stream
+  //   6. server.close()      → stop accepting new HTTP connections
+  //   7. Close Redis, DB, tracing
+  //   8. exit 0
+
+  const SHUTDOWN_TIMEOUT_MS = parseInt(
+    process.env.SHUTDOWN_TIMEOUT_MS ?? '10000',
+    10,
+  );
+  const SHUTDOWN_PRESTOP_DELAY_MS = parseInt(
+    process.env.SHUTDOWN_PRESTOP_DELAY_MS ?? '0',
+    10,
+  );
   let isShuttingDown = false;
 
-  const shutdown = (signal: string) => {
+  const shutdown = async (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
     logger.info(`Received ${signal}, starting graceful shutdown...`);
+
+    // Step 1: flip draining flag — readiness probes return 503 immediately.
+    setDraining();
+    setAcceptingSseSessions(false);
+
+    // Step 2: optional pre-stop delay for load-balancer observation of 503.
+    if (SHUTDOWN_PRESTOP_DELAY_MS > 0) {
+      logger.info(`[shutdown] pre-stop delay ${SHUTDOWN_PRESTOP_DELAY_MS}ms`);
+      await new Promise((r) => setTimeout(r, SHUTDOWN_PRESTOP_DELAY_MS));
+    }
 
     const forceExitTimer = setTimeout(() => {
       logger.error(
@@ -158,47 +204,75 @@ async function startServer() {
     }, SHUTDOWN_TIMEOUT_MS);
     forceExitTimer.unref();
 
+    // Step 3: stop schedulers so no new jobs start.
     clearInterval(pollInterval);
     clearInterval(retryInterval);
     clearInterval(reconcileInterval);
     clearInterval(divergenceInterval);
 
-    server.close(async (err) => {
-      if (err) {
-        logger.error("Error while closing HTTP server:", err);
-      } else {
-        logger.info("HTTP server closed, no longer accepting connections");
+    // Step 4: await in-flight job executions (bounded to 60 % of total timeout).
+    if (inFlightJobs > 0) {
+      logger.info(`[shutdown] waiting for ${inFlightJobs} in-flight job(s)...`);
+      const jobDrainDeadline = Date.now() + Math.floor(SHUTDOWN_TIMEOUT_MS * 0.6);
+      while (inFlightJobs > 0 && Date.now() < jobDrainDeadline) {
+        await new Promise((r) => setTimeout(r, 100));
       }
-
-      try {
-        await closeDb();
-        logger.info("Database connection closed");
-      } catch (dbErr) {
-        logger.error("Error closing database:", dbErr);
+      if (inFlightJobs > 0) {
+        logger.warn(`[shutdown] ${inFlightJobs} job(s) still running, proceeding`);
       }
+    }
 
-      try {
-        await closeCacheInvalidationSubscriber();
-        await closeRedisClients();
-        logger.info("Redis connections closed");
-      } catch (redisErr) {
-        logger.error("Error closing Redis connections:", redisErr);
+    // Step 5: drain SSE sessions — send session_ended(server_shutdown).
+    drainAllSessions();
+
+    // Step 6: close HTTP server and destroy idle keep-alive connections.
+    await new Promise<void>((resolve) => {
+      server.close((err) => {
+        if (err) {
+          logger.error("Error while closing HTTP server:", err);
+        } else {
+          logger.info("HTTP server closed");
+        }
+        resolve();
+      });
+      // closeIdleConnections() is available in Node ≥ 18.2.
+      if (
+        typeof (server as http.Server & { closeIdleConnections?: () => void })
+          .closeIdleConnections === 'function'
+      ) {
+        (server as http.Server & { closeIdleConnections: () => void }).closeIdleConnections();
       }
-
-      try {
-        await shutdownTracing();
-        logger.info("Tracing SDK shut down");
-      } catch (tracingErr) {
-        logger.error("Error shutting down tracing:", tracingErr);
-      }
-
-      clearTimeout(forceExitTimer);
-      process.exit(0);
     });
+
+    // Step 7: close Redis, DB, tracing.
+    try {
+      await closeCacheInvalidationSubscriber();
+      await closeRedisClients();
+      logger.info("Redis connections closed");
+    } catch (redisErr) {
+      logger.error("Error closing Redis connections:", redisErr);
+    }
+
+    try {
+      await closeDb();
+      logger.info("Database connection closed");
+    } catch (dbErr) {
+      logger.error("Error closing database:", dbErr);
+    }
+
+    try {
+      await shutdownTracing();
+      logger.info("Tracing SDK shut down");
+    } catch (tracingErr) {
+      logger.error("Error shutting down tracing:", tracingErr);
+    }
+
+    clearTimeout(forceExitTimer);
+    process.exit(0);
   };
 
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(1)); });
+  process.on("SIGINT",  () => { shutdown("SIGINT").catch(() => process.exit(1)); });
 }
 
 start().catch((err) => {
