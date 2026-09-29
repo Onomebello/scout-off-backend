@@ -8,7 +8,6 @@ import {
   Account,
   Transaction,
 } from '@stellar/stellar-sdk';
-import jwt from 'jsonwebtoken';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 
@@ -46,11 +45,10 @@ function resolveServerKeypair(): Keypair {
 
 const SERVER_KEYPAIR = resolveServerKeypair();
 const CHALLENGE_TTL_SECONDS = 300; // 5 min to sign the challenge
-const TOKEN_TTL_SECONDS = 86400;   // 24 h JWT validity
 
 /**
  * Tracks nonces (the base64-encoded manageData value) of SEP-10 challenges
- * that have already been redeemed for a token, so a captured signed
+ * that have already been redeemed, so a captured signed
  * challenge can't be replayed against POST /auth/token for as long as its
  * TTL window remains valid (#693).
  *
@@ -133,24 +131,19 @@ export function extractAccount(xdr: string): string | null {
 }
 
 /**
- * Verify the client-signed challenge XDR and issue a JWT.
+ * Verify the client-signed challenge XDR.
  *
  * This implements SEP-10 authentication by:
  * 1. Validating the challenge transaction structure
  * 2. Cryptographically verifying the client's signature using Keypair.verify()
- * 3. Issuing a JWT with client account and role claim
- *
- * Note: The role parameter is expected to be pre-validated by the caller.
- * Role enforcement (e.g., enum validation) is handled in the auth controller.
- * Authorized routes use requireRole() or requireRoles() middleware to enforce access.
+ * 3. Rejecting replayed challenges
  *
  * @param xdr - The signed challenge transaction in XDR format
- * @param role - Optional role claim for the JWT (defaults to 'player'). Must be validated by caller.
- * @returns JWT token and authenticated account ID
+ * @returns Authenticated account ID
  * @throws Error if challenge structure is invalid or signature verification fails
  */
-export function verifyAndIssueToken(xdr: string, role?: string): { token: string; account: string } {
-  const span = tracer.startSpan('sep10.verifyAndIssueToken');
+export function verifyChallenge(xdr: string): { account: string } {
+  const span = tracer.startSpan('sep10.verifyChallenge');
   try {
   const network =
     config.network === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
@@ -230,7 +223,7 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
 
   // 7. Reject replay of an already-redeemed challenge. SEP-10 intends each
   // challenge to be single-use; without this check, a captured signed
-  // challenge can be resubmitted for a fresh token as many times as desired
+  // challenge can be replayed within its TTL window.
   // within its TTL window.
   const nowSeconds = Math.floor(Date.now() / 1000);
   pruneConsumedChallengeNonces(nowSeconds);
@@ -241,15 +234,8 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
   }
   consumedChallengeNonces.set(nonceKey, maxTime > 0 ? maxTime : nowSeconds + CHALLENGE_TTL_SECONDS);
 
-  // Issue JWT with client account, role, and a unique JTI for revocation support
-  const jti = crypto.randomUUID();
-  const token = jwt.sign({ sub: clientAccountId, role: role ?? 'player' }, config.jwtSecret, {
-    expiresIn: TOKEN_TTL_SECONDS,
-    jwtid: jti,
-  });
-
   span.setAttribute('sep10.account', clientAccountId);
-  return { token, account: clientAccountId };
+  return { account: clientAccountId };
   } catch (err) {
     // Normalise to a plain Error before re-throwing. The SDK can throw
     // DOMException or XdrError which in some JS sandbox environments (e.g.
