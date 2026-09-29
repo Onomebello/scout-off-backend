@@ -206,20 +206,29 @@ export interface FeeHistoryItem {
 
 // ─── Contract events (indexed) ────────────────────────────────────────────────
 
-export type ContractEventType =
-  | 'player_registered'
-  | 'milestone_submitted'
-  | 'milestone_approved'
-  | 'milestone_rejected'
-  | 'scout_subscribed'
-  | 'contact_unlocked'
-  | 'trial_offer_logged'
-  | 'trial_offer_accepted'
-  | 'trial_offer_rejected'
-  | 'trial_offer_cancelled'
-  | 'fees_withdrawn'
-  | 'player_deactivated'
-  | 'player_reactivated';
+/**
+ * Single source of truth for all indexed contract event types.
+ *
+ * Every consumer (SSE route, webhook subscription validator, indexer, etc.)
+ * must derive its valid-event set from this list so the sets cannot drift.
+ */
+export const CONTRACT_EVENT_TYPES = [
+  'player_registered',
+  'milestone_submitted',
+  'milestone_approved',
+  'milestone_rejected',
+  'scout_subscribed',
+  'contact_unlocked',
+  'trial_offer_logged',
+  'trial_offer_accepted',
+  'trial_offer_rejected',
+  'trial_offer_cancelled',
+  'fees_withdrawn',
+  'player_deactivated',
+  'player_reactivated',
+] as const;
+
+export type ContractEventType = typeof CONTRACT_EVENT_TYPES[number];
 
 export interface ContractEvent {
   type: ContractEventType;

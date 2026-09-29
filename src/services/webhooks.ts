@@ -6,6 +6,7 @@ import { recordWebhookDelivery, incrementWebhookDeadLettersTotal } from '../midd
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { getCorrelationId } from '../utils/requestContext';
+import { getVersionInfo } from '../version';
 
 /**
  * Generate a unique, stable delivery identifier for a webhook event.
@@ -34,15 +35,14 @@ type WebhookRetryOptions = {
    * config.webhook.timeoutMs.
    */
   timeoutMs?: number;
+  /** Event type sent as the `X-Webhook-Event` header. */
+  eventType?: string;
+  /** Stable delivery id sent as the `X-Webhook-Delivery` header. */
+  deliveryId?: string;
 };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Generate a simple unique delivery ID (timestamp + random hex). */
-function newDeliveryId(): string {
-  return `wh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /**
@@ -62,7 +62,10 @@ export function signWebhookPayload(rawBody: string, secret: string): string {
  * Executes a webhook POST with retry logic.
  * Uses exponential backoff between attempts to reduce pressure on transient failures.
  * When `options.secret` is provided, signs the raw request body and attaches it as
- * the `X-Webhook-Signature` header.
+ * the `X-Webhook-Signature` header. Always attaches a descriptive `User-Agent`
+ * plus `X-Webhook-Event`/`X-Webhook-Delivery` headers when the corresponding
+ * options are provided, so receivers can route and deduplicate without parsing
+ * the body.
  */
 export async function postWebhookWithRetry(
   url: string,
@@ -79,7 +82,16 @@ export async function postWebhookWithRetry(
 
     // Serialize once so the signature is computed over the exact bytes sent.
     const rawBody = JSON.stringify(payload);
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'User-Agent': `ScoutOff-Webhooks/${getVersionInfo().version}`,
+    };
+    if (options.eventType) {
+      headers['X-Webhook-Event'] = options.eventType;
+    }
+    if (options.deliveryId) {
+      headers['X-Webhook-Delivery'] = options.deliveryId;
+    }
     if (options.secret) {
       headers['X-Webhook-Signature'] = signWebhookPayload(rawBody, options.secret);
     }
@@ -203,6 +215,8 @@ async function deliverToSubscription(
     await postWebhookWithRetry(subscription.url, body, {
       ...RETRY_OPTIONS,
       secret: subscription.secret,
+      eventType,
+      deliveryId,
     });
     recordWebhookDelivery('success');
     recordDeliveryHistory(subscription, eventType, deliveryId, {
@@ -225,11 +239,4 @@ async function deliverToSubscription(
     });
     incrementWebhookDeadLettersTotal();
     recordWebhookDelivery('dead_letter');
-    recordDeliveryHistory(subscription, eventType, deliveryId, {
-      status: 'failure',
-      errorMessage: failureReason,
-      attemptCount: RETRY_OPTIONS.retries,
-      latencyMs: Date.now() - startedAt,
-    });
-  }
-}
+    recordDeliveryHistory(subscription,

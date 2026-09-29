@@ -1173,3 +1173,8 @@ Fixes #XXX / Related to #YYY
 - **Contributing via Drips?** Visit the [Drips contributor portal](https://drips.network) for wave-specific guidance
 
 Please see [CONTRIBUTING.md](CONTRIBUTING.md) for additional guidelines.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1392 -->
+- #1392: Add a Mermaid sequence diagram of the full SEP-10 + refresh/logout lifecycle to docs/auth.md
