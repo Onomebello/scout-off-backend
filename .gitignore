@@ -22,3 +22,6 @@ jest.scoutNotes.config.js
 
 # PR description files (local working notes, not for review)
 pr-*.md
+# Kiro-generated files and temporary artifacts
+k/
+
