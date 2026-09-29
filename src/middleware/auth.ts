@@ -5,9 +5,11 @@ import { sendUnauthorized, sendForbidden } from '../utils/authError';
 import { logger } from '../utils/logger';
 import { isTokenRevoked } from '../services/tokenBlocklist';
 import { logAuditEvent } from '../services/audit';
+import { resolveApiKey } from '../services/apiKeyService';
 import { verifyJwt } from '../utils/jwt';
 import { hasApiKeyScope, ApiKeyScope } from '../utils/apiKeyScopes';
 import { ErrorCode } from '../utils/errorCodes';
+import { touchApiKeyLastUsed } from '../db';
 
 export interface AuthPayload extends jwt.JwtPayload, Partial<JwtPayload> {}
 
@@ -18,14 +20,6 @@ function verifyToken(token: string): AuthPayload {
 
 function tokenErrorCode(err: unknown): ErrorCode {
   return err instanceof jwt.TokenExpiredError ? ErrorCode.TOKEN_EXPIRED : ErrorCode.TOKEN_INVALID;
-}
-
-/** Shape returned by the API-key controller's resolver. */
-interface ResolvedApiKey {
-  scout_wallet: string;
-  id: number;
-  /** Parsed scope list; null = legacy/unrestricted key. */
-  scopes: string[] | null;
 }
 
 /**
@@ -43,17 +37,15 @@ export async function authenticateApiKey(
   res: Response,
   requiredRole?: string,
 ): Promise<'ok' | 'forbidden' | 'unauthorized'> {
+  const apiKeyHeader = req.headers['x-api-key'];
+  if (typeof apiKeyHeader !== 'string') {
+    logger.warn({ method: req.method, path: req.path, error: 'Missing API key' });
+    sendUnauthorized(res, 'Invalid or revoked API key');
+    return 'unauthorized';
+  }
+
   try {
-    // Lazy require avoids a circular module dependency at load time.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { resolveApiKey } = require('../controllers/apiKeyController') as {
-      resolveApiKey: (rawKey: string) => Promise<ResolvedApiKey | null>;
-    };
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { touchApiKeyLastUsed } = require('../db') as {
-      touchApiKeyLastUsed: (id: number) => Promise<void>;
-    };
-    const resolved = await resolveApiKey(req.headers['x-api-key'] as string);
+    const resolved = await resolveApiKey(apiKeyHeader);
     if (!resolved) {
       logger.warn({ method: req.method, path: req.path, error: 'Invalid or revoked API key' });
       sendUnauthorized(res, 'Invalid or revoked API key');
@@ -71,13 +63,20 @@ export async function authenticateApiKey(
       sendForbidden(res, 'Insufficient permissions', { requiredRole, providedRole: 'scout' });
       return 'forbidden';
     }
-    Promise.resolve(touchApiKeyLastUsed(resolved.id)).catch(() => { /* best-effort */ });
+    void Promise.resolve(touchApiKeyLastUsed(resolved.id)).catch((err) => {
+      logger.warn({ method: req.method, path: req.path, error: 'Failed to update API key last-used timestamp' }, err);
+    });
     req.account = resolved.scout_wallet;
     req.role = 'scout';
     req.apiKeyScopes = resolved.scopes;
     return 'ok';
-  } catch {
-    logger.warn({ method: req.method, path: req.path, error: 'API key auth error' });
+  } catch (err) {
+    logger.warn({
+      method: req.method,
+      path: req.path,
+      error: 'API key auth error',
+      cause: err instanceof Error ? err.message : String(err),
+    });
     sendUnauthorized(res, 'Invalid or revoked API key');
     return 'unauthorized';
   }

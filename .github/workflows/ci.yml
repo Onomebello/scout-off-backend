@@ -178,6 +178,37 @@ jobs:
           POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/scout_off_ci
           CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
 
+  redis-integration:
+    name: Redis integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run integration tests against Redis
+        run: node node_modules/jest/bin/jest.js --runInBand --forceExit --runTestsByPath tests/services/redis.integration.test.ts
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+
   # Catches "compiles but doesn't run" regressions (bad import path, missing
   # runtime asset like db/ migrations or openapi files) that tsc alone can't
   # see, since nothing else in this workflow boots the compiled dist/ output.
@@ -358,6 +389,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -372,6 +404,17 @@ jobs:
       - name: Build contracts (WASM)
         working-directory: contracts
         run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Check formatting
+        working-directory: contracts
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        working-directory: contracts
+        run: cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+
+      - name: Report optimized WASM sizes
+        run: bash scripts/report-contract-wasm-size.sh
 
       # contracts/.cargo/config.toml sets wasm32-unknown-unknown as the
       # default build target for this workspace, so host-target commands

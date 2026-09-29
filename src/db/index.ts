@@ -17,6 +17,7 @@ import {
   createBetterSqlite3LoadError,
   isBetterSqlite3LoadFailure,
 } from './betterSqlite3Error';
+import { ApiKeyLimitError, MAX_API_KEYS_PER_SCOUT, MAX_WEBHOOK_SUBSCRIPTIONS_PER_SCOUT, WebhookSubscriptionLimitError } from '../utils/scoutResourceLimits';
 
 const dbTracer = trace.getTracer('scout-off-backend');
 
@@ -2094,16 +2095,27 @@ export async function insertApiKey(p: {
     RETURNING id
   `;
   return timedQueryAsync(sql, async () => {
-    const info = await getDriver().run(sql, [
-      p.key_hash,
-      p.scout_wallet,
-      p.label,
-      p.created_at,
-      p.scopes ? JSON.stringify(p.scopes) : null,
-      p.lookup_hash ?? null,
-      p.expires_at ?? null,
-    ]);
-    return info.lastId;
+    return getDriver().transaction(async (tx) => {
+      await tx.lockForWrite(`api-key-limit:${p.scout_wallet}`);
+      const count = await tx.value<number | string>(
+        'SELECT COUNT(*) FROM api_keys WHERE scout_wallet = ?',
+        [p.scout_wallet],
+      );
+      if (Number(count ?? 0) >= MAX_API_KEYS_PER_SCOUT) {
+        throw new ApiKeyLimitError();
+      }
+
+      const info = await tx.run(sql, [
+        p.key_hash,
+        p.scout_wallet,
+        p.label,
+        p.created_at,
+        p.scopes ? JSON.stringify(p.scopes) : null,
+        p.lookup_hash ?? null,
+        p.expires_at ?? null,
+      ]);
+      return info.lastId;
+    });
   });
 }
 
@@ -2904,15 +2916,27 @@ export function createWebhookSubscription(
   const eventTypesJson = eventTypes && eventTypes.length > 0 ? JSON.stringify(eventTypes) : null;
   const sql = 'INSERT INTO webhook_subscriptions (url, secret, scout_wallet, event_types) VALUES (?, ?, ?, ?)';
   return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(url, encryptedSecret, scoutWallet ?? null, eventTypesJson);
-    return {
-      id: Number(info.lastInsertRowid),
-      url,
-      secret: finalSecret,
-      scout_wallet: scoutWallet ?? null,
-      event_types: eventTypesJson,
-      created_at: new Date().toISOString(),
-    };
+    const insert = getDb().transaction(() => {
+      if (scoutWallet) {
+        const row = getDb()
+          .prepare('SELECT COUNT(*) AS count FROM webhook_subscriptions WHERE scout_wallet = ?')
+          .get(scoutWallet) as { count: number } | undefined;
+        if ((row?.count ?? 0) >= MAX_WEBHOOK_SUBSCRIPTIONS_PER_SCOUT) {
+          throw new WebhookSubscriptionLimitError();
+        }
+      }
+
+      const info = getDb().prepare(sql).run(url, encryptedSecret, scoutWallet ?? null, eventTypesJson);
+      return {
+        id: Number(info.lastInsertRowid),
+        url,
+        secret: finalSecret,
+        scout_wallet: scoutWallet ?? null,
+        event_types: eventTypesJson,
+        created_at: new Date().toISOString(),
+      };
+    });
+    return insert();
   });
 }
 
