@@ -408,7 +408,14 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
 
   // Start the shared sweep timer once the first connection opens.
   if (!authSweepTimer) {
-    authSweepTimer = setInterval(runAuthorizationSweep, AUTH_SWEEP_INTERVAL_MS);
+    authSweepTimer = setInterval(() => {
+      void runAuthorizationSweep().catch((err: unknown) => {
+        logger.error(
+          '[sse] authorization sweep failed:',
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    }, AUTH_SWEEP_INTERVAL_MS);
     authSweepTimer.unref();
   }
 });

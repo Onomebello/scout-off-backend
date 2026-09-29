@@ -134,6 +134,22 @@ describe('POST /api/players/register — role enforcement', () => {
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
   });
+
+  it('returns success even when the registration webhook dispatch rejects', async () => {
+    const token = makeToken(PLAYER_WALLET, 'player');
+    const { dispatchEventWebhook } = require('../../src/services/webhooks') as {
+      dispatchEventWebhook: jest.Mock;
+    };
+    dispatchEventWebhook.mockRejectedValueOnce(new Error('webhook unavailable'));
+
+    const res = await request(app)
+      .post('/api/players/register')
+      .set('Authorization', `Bearer ${token}`)
+      .send(validPayload);
+
+    expect(res.status).toBe(201);
+    expect(res.body.success).toBe(true);
+  });
 });
 
 describe('POST /api/players/register — cache invalidation ordering', () => {

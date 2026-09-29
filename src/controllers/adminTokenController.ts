@@ -31,7 +31,11 @@ export async function revokeTokenController(req: Request, res: Response, next: N
     expiresAt = decoded.exp ?? defaultExpiresAt;
   }
 
-  revokeToken(jti as string, expiresAt);
+  if (!jti) {
+    res.status(400).json({ success: false, error: 'Token does not contain a jti claim', code: ErrorCode.VALIDATION_ERROR });
+    return;
+  }
+  await revokeToken(jti, expiresAt);
   res.json({ success: true, data: { jti } });
 }
 

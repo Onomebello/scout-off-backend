@@ -1,5 +1,7 @@
 # ─── Stage 1: Build ──────────────────────────────────────────────────────────
-FROM node:22-alpine AS builder
+# Pin the multi-architecture Node image index digest so both stages build from
+# the same immutable base. Update this digest deliberately to pick up patches.
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS builder
 
 # Accept the Git commit SHA at build time (defaults to "unknown")
 ARG GIT_COMMIT=unknown
@@ -27,7 +29,7 @@ RUN npm run build
 RUN HUSKY=0 npm ci --omit=dev
 
 # ─── Stage 2: Runtime ────────────────────────────────────────────────────────
-FROM node:22-alpine AS runtime
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
 
 # Re-declare ARG so the value is available in this stage, then bake it into
 # the image as an ENV so the running container can read it via process.env.
