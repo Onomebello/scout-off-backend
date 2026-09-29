@@ -12,6 +12,7 @@
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import express from 'express';
+import type { Request, Response } from 'express';
 
 const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 const WALLET = 'GSCOUTWALLET1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
@@ -380,6 +381,7 @@ describe('idempotency middleware — request fingerprint conflicts', () => {
         expires_at: Date.now() + 24 * 60 * 60 * 1000,
         request_fingerprint: requestFingerprint ?? null,
       });
+
       return true;
     });
     mockGet.mockImplementation((key: string) => {
@@ -431,5 +433,48 @@ describe('idempotency middleware — request fingerprint conflicts', () => {
 
     expect(conflict.status).toBe(409);
     expect(conflict.body.error).toMatch(/different request/i);
+  });
+});
+
+describe('idempotency middleware — key validation', () => {
+  const validationApp = express();
+  validationApp.post('/items', idempotency, (_req, res) => res.json({ ok: true }));
+
+  it('rejects keys longer than 255 bytes without accessing the idempotency store', async () => {
+    const res = await request(validationApp)
+      .post('/items')
+      .set('Idempotency-Key', 'k'.repeat(256))
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(mockClaim).not.toHaveBeenCalled();
+  });
+
+  it('rejects control characters without accessing the idempotency store', async () => {
+    const response = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn().mockReturnThis(),
+    };
+    const next = jest.fn();
+
+    idempotency(
+      {
+        params: {},
+        headers: { 'idempotency-key': 'bad\u0001key' },
+      } as unknown as Request,
+      response as unknown as Response,
+      next,
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith({
+      error: 'Idempotency-Key must be at most 255 bytes and contain no control characters',
+    });
+    expect(next).not.toHaveBeenCalled();
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(mockClaim).not.toHaveBeenCalled();
   });
 });

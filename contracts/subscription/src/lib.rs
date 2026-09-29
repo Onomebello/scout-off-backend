@@ -342,7 +342,11 @@ impl SubscriptionContract {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
         }
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
         admin.require_auth();
         if admin != stored_admin {
             return Err(Error::Unauthorized);
@@ -739,6 +743,17 @@ mod tests {
         client.set_platform_fee_bps(&admin, &250u32);
         let fee = client.get_contact_fee();
         assert!(fee > 0);
+    }
+
+    #[test]
+    fn set_platform_fee_bps_fails_when_not_initialized() {
+        let env = Env::default();
+        let (client, admin, _token) = setup(&env);
+
+        assert_eq!(
+            client.try_set_platform_fee_bps(&admin, &250u32),
+            Err(Ok(Error::NotInitialized))
+        );
     }
 
     #[test]

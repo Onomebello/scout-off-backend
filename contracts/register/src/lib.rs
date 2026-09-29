@@ -9,6 +9,10 @@ use scout_off_shared::{
     },
 };
 
+const MAX_METADATA_URI_BYTES: u32 = 2_048;
+const MAX_POSITION_BYTES: u32 = 64;
+const MAX_REGION_BYTES: u32 = 64;
+
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
@@ -186,16 +190,17 @@ impl RegisterContract {
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `wallet` - The player's Stellar wallet address (must authorize this call).
-    /// * `metadata_uri` - IPFS/Arweave content URI containing the player's off-chain profile.
-    /// * `position` - Playing position string, e.g. `"forward"`, `"midfielder"`.
-    /// * `region` - Geographic region string, e.g. `"europe"`, `"west africa"`.
+    /// * `metadata_uri` - Non-empty IPFS/Arweave URI up to 2,048 bytes.
+    /// * `position` - Non-empty playing position string up to 64 bytes.
+    /// * `region` - Non-empty geographic region string up to 64 bytes.
     ///
     /// # Returns
     /// `Ok(player_id)` — the newly assigned unique player identifier (`u64`).
     ///
     /// # Errors
     /// * [`Error::NotInitialized`] — [`initialize`] has not been called yet.
-    /// * [`Error::InvalidInput`] — The calling wallet is already registered.
+    /// * [`Error::InvalidInput`] — The wallet is already registered, or a
+    ///   profile field is empty or exceeds its maximum byte length.
     pub fn register_player(
         env: Env,
         wallet: Address,
@@ -205,6 +210,15 @@ impl RegisterContract {
     ) -> Result<u64, Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
+        }
+        if metadata_uri.len() == 0
+            || metadata_uri.len() > MAX_METADATA_URI_BYTES
+            || position.len() == 0
+            || position.len() > MAX_POSITION_BYTES
+            || region.len() == 0
+            || region.len() > MAX_REGION_BYTES
+        {
+            return Err(Error::InvalidInput);
         }
         wallet.require_auth();
 
@@ -268,6 +282,9 @@ impl RegisterContract {
     ) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
+        }
+        if metadata_uri.len() == 0 || metadata_uri.len() > MAX_METADATA_URI_BYTES {
+            return Err(Error::InvalidInput);
         }
 
         let mut player: PlayerData = match env
@@ -490,6 +507,20 @@ mod tests {
         (client, admin, token)
     }
 
+    fn assert_invalid_registration(
+        env: &Env,
+        client: &RegisterContractClient<'_>,
+        metadata_uri: &String,
+        position: &String,
+        region: &String,
+    ) {
+        let wallet = Address::generate(env);
+        assert_eq!(
+            client.try_register_player(&wallet, metadata_uri, position, region),
+            Err(Ok(Error::InvalidInput))
+        );
+    }
+
     #[test]
     fn register_creates_profile_with_zero_progress() {
         let env = Env::default();
@@ -509,6 +540,42 @@ mod tests {
         assert_eq!(player.wallet, wallet);
         assert_eq!(player.position, String::from_str(&env, "forward"));
         assert_eq!(player.region, String::from_str(&env, "europe"));
+    }
+
+    #[test]
+    fn register_rejects_empty_and_oversized_profile_fields() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &100);
+        let valid_uri = String::from_str(&env, "ipfs://meta");
+        let valid_position = String::from_str(&env, "forward");
+        let valid_region = String::from_str(&env, "europe");
+        let empty = String::from_str(&env, "");
+
+        assert_invalid_registration(&env, &client, &empty, &valid_position, &valid_region);
+        assert_invalid_registration(&env, &client, &valid_uri, &empty, &valid_region);
+        assert_invalid_registration(&env, &client, &valid_uri, &valid_position, &empty);
+        assert_invalid_registration(
+            &env,
+            &client,
+            &String::from_str(&env, &"x".repeat(MAX_METADATA_URI_BYTES as usize + 1)),
+            &valid_position,
+            &valid_region,
+        );
+        assert_invalid_registration(
+            &env,
+            &client,
+            &valid_uri,
+            &String::from_str(&env, &"x".repeat(MAX_POSITION_BYTES as usize + 1)),
+            &valid_region,
+        );
+        assert_invalid_registration(
+            &env,
+            &client,
+            &valid_uri,
+            &valid_position,
+            &String::from_str(&env, &"x".repeat(MAX_REGION_BYTES as usize + 1)),
+        );
     }
 
     #[test]
@@ -551,6 +618,32 @@ mod tests {
         client.update_profile(&pid, &String::from_str(&env, "ipfs://new"));
         let player = client.get_player(&pid);
         assert_eq!(player.metadata_uri, String::from_str(&env, "ipfs://new"));
+    }
+
+    #[test]
+    fn update_profile_rejects_empty_or_oversized_metadata_uri() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &100);
+        let wallet = Address::generate(&env);
+        let player_id = client.register_player(
+            &wallet,
+            &String::from_str(&env, "ipfs://meta"),
+            &String::from_str(&env, "forward"),
+            &String::from_str(&env, "europe"),
+        );
+
+        assert_eq!(
+            client.try_update_profile(&player_id, &String::from_str(&env, "")),
+            Err(Ok(Error::InvalidInput))
+        );
+        assert_eq!(
+            client.try_update_profile(
+                &player_id,
+                &String::from_str(&env, &"x".repeat(MAX_METADATA_URI_BYTES as usize + 1))
+            ),
+            Err(Ok(Error::InvalidInput))
+        );
     }
 
     #[test]

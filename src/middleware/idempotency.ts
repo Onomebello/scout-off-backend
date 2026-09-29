@@ -12,6 +12,7 @@ import { logger } from '../utils/logger';
  * giving up and returning a 409 to the second caller.
  */
 const IN_PROGRESS_WAIT_MS = 5_000;
+const MAX_IDEMPOTENCY_KEY_BYTES = 255;
 
 /**
  * Options for the idempotency middleware.
@@ -89,6 +90,16 @@ async function handleIdempotency(
   }
 
   const trimmedKey = key.trim();
+  if (
+    Buffer.byteLength(trimmedKey, 'utf8') > MAX_IDEMPOTENCY_KEY_BYTES ||
+    containsControlCharacters(trimmedKey)
+  ) {
+    res.status(400).json({
+      error: 'Idempotency-Key must be at most 255 bytes and contain no control characters',
+    });
+    return;
+  }
+
   const requestFingerprint = options?.requestFingerprint
     ? options.requestFingerprint(req)
     : null;
@@ -201,6 +212,13 @@ async function handleIdempotency(
   };
 
   next();
+}
+
+function containsControlCharacters(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f;
+  });
 }
 
 /**
