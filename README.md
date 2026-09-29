@@ -339,6 +339,9 @@ npm run dev
 | `npm run build` | `tsc`                                                     | Compile TypeScript to `dist/`               |
 | `npm start`     | `node dist/index.js`                                      | Run the compiled server (run `build` first) |
 | `npm test`      | `jest --runInBand`                                        | Run the test suite                          |
+| `npm run test:contracts` | Unit and invariant contract tests (CI-equivalent) | Run the Rust workspace tests                 |
+| `npm run test:contracts:unit` | `cargo test --workspace --lib`                   | Run contract unit tests                      |
+| `npm run test:contracts:invariants` | `cargo test --workspace --tests ... invariants` | Run contract invariant tests (256 cases)      |
 | `npm run lint`  | `eslint 'src/**/*.ts' 'tests/**/*.ts' --ext .ts`          | Run TypeScript linting                      |
 | `npm run seed`  | `ts-node --project tsconfig.scripts.json scripts/seed.ts` | Seed the local DB with sample data          |
 | `npm run backfill` | `node scripts/backfill.js`                             | Reset the indexer's last_ledger to replay events from a given ledger |
@@ -839,8 +842,8 @@ Operator topics (secrets rotation, data privacy, Postgres migration, deployment)
 ## Testing
 
 ```bash
-# Smart contract tests (all four Soroban contracts are implemented and tested)
-cd contracts && cargo test
+# Smart contract tests (workspace unit tests and CI-sized invariant tests)
+npm run test:contracts
 
 # Backend tests
 npm run test

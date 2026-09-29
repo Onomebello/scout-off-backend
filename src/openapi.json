@@ -5515,7 +5515,7 @@
         ],
         "summary": "DEPRECATED alias of POST /api/scouts/:wallet/trial-offers (#1034).",
         "operationId": "createTrialOffer",
-        "description": "DEPRECATED alias of POST /api/scouts/:wallet/trial-offers (#1034). It runs the\nsame handler, so it carries the same middleware chain — including walletRateLimit\nand idempotency, which guard the on-chain submission this route now performs.\n\nUse POST /api/scouts/:wallet/trial-offers instead.",
+        "description": "DEPRECATED alias of POST /api/scouts/:wallet/trial-offers (#1034). It runs the\nsame handler, so it carries the same middleware chain — including walletRateLimit\nand idempotency, which guard the on-chain submission this route now performs.\n\nUse POST /api/scouts/:wallet/trial-offers instead.\nResponses include the RFC 9745 Deprecation header, effective 2026-08-18.",
         "deprecated": true,
         "parameters": [
           {

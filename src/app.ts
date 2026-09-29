@@ -241,7 +241,13 @@ app.get('/health', async (_req, res) => {
 
   healthStatus.db = await probeDb();
 
-  res.json({ status: 'ok', healthStatus });
+  const healthy = Object.values(healthStatus).every(
+    (status) => status === 'ok' || status === 'disabled',
+  );
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'degraded',
+    healthStatus,
+  });
 });
 
 /**

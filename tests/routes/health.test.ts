@@ -258,7 +258,13 @@ describe.each(READINESS_PATHS)('%s', (path) => {
 // ─── /health ─────────────────────────────────────────────────────────────────
 
 describe('GET /health', () => {
+  const previousStellarHealthCheckEnabled = config.stellarHealthCheckEnabled;
+
   afterEach(() => {
+    (config as { stellarHealthCheckEnabled: boolean }).stellarHealthCheckEnabled =
+      previousStellarHealthCheckEnabled;
+    mockStellarHealth.mockReset();
+    mockStellarHealth.mockResolvedValue(true);
     mockGetDriver.mockReset();
     mockGetDriver.mockImplementation(getRealDriver);
   });
@@ -276,15 +282,25 @@ describe('GET /health', () => {
     expect(res.body.healthStatus.db).toBe('ok');
   });
 
-  it('reports db:error in healthStatus but still returns 200 when the DB probe fails', async () => {
-    // /health is a liveness probe — it always returns 200.
-    // A DB failure is surfaced in healthStatus.db without changing the HTTP status.
+  it('returns 503 with status degraded when the DB probe fails', async () => {
     mockGetDriver.mockImplementation(() =>
       driverWith({ get: () => Promise.reject(new Error('SQLITE_BUSY: database is locked')) }),
     );
     const res = await request(app).get('/health');
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('degraded');
     expect(res.body.healthStatus.db).toBe('error');
+  });
+
+  it('returns 503 when the enabled Stellar probe fails', async () => {
+    (config as { stellarHealthCheckEnabled: boolean }).stellarHealthCheckEnabled = true;
+    mockStellarHealth.mockResolvedValueOnce(false);
+
+    const res = await request(app).get('/health');
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('degraded');
+    expect(res.body.healthStatus.stellar).toBe('error');
   });
 });
 

@@ -1,9 +1,32 @@
-import { buildChallenge, verifyAndIssueToken } from '../../src/services/sep10';
+import { buildChallenge, extractAccount, verifyAndIssueToken } from '../../src/services/sep10';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { Keypair, Transaction, Networks, TransactionBuilder, BASE_FEE, Operation, Account, Asset } from '@stellar/stellar-sdk';
 
 const clientKeypair = Keypair.random();
+
+describe('extractAccount', () => {
+  it('extracts the account from an unsigned challenge XDR', () => {
+    const xdr = buildChallenge(clientKeypair.publicKey());
+
+    expect(extractAccount(xdr)).toBe(clientKeypair.publicKey());
+  });
+
+  it('returns null for malformed XDR', () => {
+    expect(extractAccount('not-valid-xdr')).toBeNull();
+  });
+
+  it('returns null when the transaction has no operations', () => {
+    const tx = new TransactionBuilder(new Account(clientKeypair.publicKey(), '-1'), {
+      fee: BASE_FEE,
+      networkPassphrase: Networks.TESTNET,
+    })
+      .setTimeout(300)
+      .build();
+
+    expect(extractAccount(tx.toXdr())).toBeNull();
+  });
+});
 
 describe('sep10', () => {
   it('buildChallenge returns a valid XDR string', () => {

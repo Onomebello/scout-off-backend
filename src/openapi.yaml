@@ -3890,6 +3890,7 @@ paths:
         and idempotency, which guard the on-chain submission this route now performs.
 
         Use POST /api/scouts/:wallet/trial-offers instead.
+        Responses include the RFC 9745 Deprecation header, effective 2026-08-18.
       deprecated: true
       parameters:
         - name: wallet

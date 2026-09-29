@@ -483,7 +483,7 @@ Dependabot is configured in `.github/dependabot.yml` to open pull requests for o
 
 When Dependabot opens a Cargo PR, verify:
 1. Review the Cargo.lock diff and the crate's CHANGELOG for breaking changes.
-2. Run `cd contracts && cargo test --target x86_64-unknown-linux-gnu` locally to confirm the contracts still build and pass tests.
+2. Run `npm run test:contracts` locally to run the workspace unit tests and CI-sized invariant tests.
 3. Merge or close the PR — do **not** leave stale Dependabot PRs open longer than one sprint.
 
 ### Supply Chain Security

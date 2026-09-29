@@ -241,6 +241,7 @@ router.route('/:wallet/payments')
  * and idempotency, which guard the on-chain submission this route now performs.
  *
  * @deprecated Use POST /api/scouts/:wallet/trial-offers instead.
+ * Responses include the RFC 9745 Deprecation header, effective 2026-08-18.
  * @param wallet {string} - Scout's Stellar public key
  * @body { playerId: string, detailsUri: string }
  * @response 201 { success: true, data: { offerId, transactionId, scout, playerId, detailsUri, createdAt, tierPromoted: true, newTier: 3 } }
@@ -253,6 +254,11 @@ router.route('/:wallet/payments')
  */
 router.route('/:wallet/trial-offer')
   .post(
+    (_req, res, next) => {
+      // RFC 9745 Structured Field Date: 2026-08-18.
+      res.setHeader('Deprecation', '@1787011200');
+      next();
+    },
     requireRole('scout'),
     requireWalletOwner({ validateAddress: false }),
     requireApiKeyScope('write:trial_offers'),
