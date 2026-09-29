@@ -43,9 +43,7 @@ const server = new Proxy(rawServer, {
 export { server, stellarBreaker };
 
 export function networkPassphrase(): string {
-  return config.network === 'mainnet'
-    ? Networks.PUBLIC
-    : Networks.TESTNET;
+  return config.networkPassphrase;
 }
 
 /**

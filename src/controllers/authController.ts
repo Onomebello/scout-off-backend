@@ -127,8 +127,21 @@ try {
         'Invalid challenge signature',
         'Missing source account in challenge',
         'Challenge has expired',
+        'Challenge source account is not the server account',
+        'Challenge sequence number must be 0',
+        'Challenge must have time bounds',
+        'Challenge minTime is in the future',
+        'Invalid challenge: no operations found',
+        'Invalid challenge: expected manageData operation',
+        'Invalid challenge: operation',
+        'Invalid challenge: wrong operation name',
+        'Invalid challenge: missing nonce value',
+        'Invalid challenge: nonce must be exactly 64 bytes',
+        'Operation',
+        'must be sourced by the server account',
+        'Challenge not signed by server',
       ];
-      if (knownAuthErrors.includes(error.message)) {
+      if (knownAuthErrors.some((msg) => error.message.includes(msg))) {
         let attemptedWallet: string | null = null;
         try { attemptedWallet = extractAccount((req.body as { transaction?: string }).transaction ?? ''); } catch { /* not extractable */ }
         logger.warn('[auth] failed_token_exchange', {
