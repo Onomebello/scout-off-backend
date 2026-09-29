@@ -25,3 +25,5 @@ pr-*.md
 # Kiro-generated files and temporary artifacts
 k/
 
+pr-1344-1347.md
+apiKeyScopes.txt

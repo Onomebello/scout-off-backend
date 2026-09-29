@@ -276,7 +276,8 @@ router.route('/:wallet/trial-offer')
  *
  * @param wallet {string} - Scout's Stellar public key
  * @response 200 { success: true, data: TrialOfferEvent[] }
- * @auth Bearer (scout role required)
+ * @response 403 { success: false, error: string } - Wallet mismatch (non-admin/non-owner)
+ * @auth Bearer (scout role required; wallet must match authenticated account)
  *
  * POST /api/scouts/:wallet/trial-offers
  *
@@ -297,7 +298,12 @@ router.route('/:wallet/trial-offer')
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/trial-offers')
-  .get(requireRole('scout'), requireApiKeyScope('read:milestones'), listTrialOffers)
+  .get(
+    requireRole('scout', 'admin'),
+    requireWalletOwner({ mismatchStatus: 401 }),
+    requireApiKeyScope('read:trial_offers'),
+    listTrialOffers,
+  )
   .post(
     requireRole('scout'),
     requireWalletOwner({ validateAddress: false }),
