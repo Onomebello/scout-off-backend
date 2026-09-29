@@ -150,37 +150,12 @@ impl RegisterContract {
         Ok(())
     }
 
-    /// Update the platform fee in basis points. Admin-only.
-    /// Valid range: 0–10000 (0% to 100%). Emits a fee_upd event.
-    pub fn set_platform_fee_bps(env: Env, new_bps: u32) -> Result<(), Error> {
-        if !is_initialized(&env) {
-            return Err(Error::NotInitialized);
-        }
-        if new_bps > 10000 {
-            return Err(Error::InvalidInput);
-        }
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-        admin.require_auth();
-        env.storage()
-            .instance()
-            .set(&DataKey::PlatformFeeBps, &new_bps);
-        env.events()
-            .publish((symbol_short!("fee_upd"),), (new_bps,));
-        bump_instance(&env);
-        Ok(())
-    }
-
-    /// Return the current platform fee in basis points.
-    pub fn get_platform_fee_bps(env: Env) -> Result<u32, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::PlatformFeeBps)
-            .ok_or(Error::NotInitialized)
-    }
+    // Note: platform fee configuration has been consolidated into the subscription
+    // contract, which is the authoritative source. set_platform_fee_bps and
+    // get_platform_fee_bps were removed from this contract to avoid duplication.
+    // The register contract still stores PlatformFeeBps from initialize() for
+    // historical compatibility, but fee updates are performed exclusively via
+    // SubscriptionContract::set_platform_fee_bps.
 
     // ── Pause / Unpause ────────────────────────────────────────────────────
 

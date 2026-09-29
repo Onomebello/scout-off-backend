@@ -48,6 +48,7 @@ import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { logger } from '../utils/logger';
 import { CircuitBreaker, CircuitBreakerOpenError } from '../utils/circuitBreaker';
+import { getRequestSignal } from '../utils/requestContext';
 import {
   insertPendingPin,
   getPendingPins,
@@ -263,7 +264,11 @@ export async function pinJson(body: object): Promise<string> {
 
           try {
             const res = await ipfsBreaker.execute(() =>
-              axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders(), ...axiosTimeout }),
+              axios.post(PINATA_PIN_JSON_URL, body, {
+                headers: pinataHeaders(),
+                ...axiosTimeout,
+                signal: getRequestSignal(),
+              }),
             );
             const uploadedCid = res.data.IpfsHash as string;
             // Persist the CID into the pending_pins row BEFORE deleting it so any
@@ -314,6 +319,7 @@ export async function pinFile(buffer: Buffer, filename: string, mimeType: string
         headers: { ...pinataHeaders(), ...form.getHeaders() },
         maxBodyLength: Infinity,
         ...axiosTimeout,
+        signal: getRequestSignal(),
       }),
     );
     const cid = res.data.IpfsHash as string;

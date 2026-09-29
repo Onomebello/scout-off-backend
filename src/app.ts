@@ -148,6 +148,17 @@ const corsOptions: CorsOptions = {
 const app = express();
 // Track process startup time for readiness grace period
 const processStartTime = Date.now();
+
+/**
+ * Draining flag — set to true when SIGTERM/SIGINT is received.
+ * Readiness probes return 503 immediately once this is set so that load
+ * balancers stop routing new traffic before the server closes.
+ * Liveness probes continue returning 200 so Kubernetes doesn't restart
+ * the pod while it is draining.
+ */
+let _draining = false;
+export function setDraining(): void { _draining = true; }
+export function isDraining(): boolean { return _draining; }
 // Disable Express's default X-Powered-By header. helmet() also does this, but
 // being explicit here ensures it is suppressed regardless of middleware order.
 app.disable('x-powered-by');
@@ -357,6 +368,10 @@ async function checkReadiness(): Promise<Record<string, ProbeResult>> {
 }
 
 app.get('/ready', async (_req, res) => {
+  if (isDraining()) {
+    res.status(503).json({ status: 'draining' });
+    return;
+  }
   const services = await checkReadiness();
   const allOk = Object.values(services).every(v => v.status === 'ok' || v.status === 'disabled');
   if (allOk) {
@@ -372,6 +387,10 @@ app.get('/health/liveness', createTimeout(5_000), (_req, res) => {
 });
 
 app.get('/health/readiness', createTimeout(5_000), async (_req, res) => {
+  if (isDraining()) {
+    res.status(503).json({ status: 'draining' });
+    return;
+  }
   const services = await checkReadiness();
   const allOk = Object.values(services).every(v => v.status === 'ok' || v.status === 'disabled');
   if (allOk) {
