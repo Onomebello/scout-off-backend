@@ -566,6 +566,127 @@ const config = {
     sampleSize: parseNumericEnv('TIER_DIVERGENCE_SAMPLE_SIZE', process.env.TIER_DIVERGENCE_SAMPLE_SIZE, 100, { min: 1, integer: true }),
   },
 
+  // ── Readiness / health check timeouts ──────────────────────────────────
+  // Per-component timeout for readiness probes (#1317)
+  readinessDb: {
+    timeoutMs: parseNumericEnv('READINESS_DB_TIMEOUT_MS', process.env.READINESS_DB_TIMEOUT_MS, 2000, { min: 1, integer: true }),
+  },
+  readinessIpfs: {
+    timeoutMs: parseNumericEnv('READINESS_IPFS_TIMEOUT_MS', process.env.READINESS_IPFS_TIMEOUT_MS, 5000, { min: 1, integer: true }),
+  },
+  readinessStellar: {
+    timeoutMs: parseNumericEnv('READINESS_STELLAR_TIMEOUT_MS', process.env.READINESS_STELLAR_TIMEOUT_MS, 5000, { min: 1, integer: true }),
+  },
+
+  // ── Server-Sent Events (SSE) ──────────────────────────────────────────
+  sse: {
+    /** Interval between keep-alive pings sent to SSE clients (ms). */
+    keepaliveIntervalMs: parseNumericEnv('SSE_KEEPALIVE_INTERVAL_MS', process.env.SSE_KEEPALIVE_INTERVAL_MS, 15000, { min: 1, integer: true }),
+    /** Max concurrent SSE connections (0 = unlimited). */
+    maxConnections: parseNumericEnv('SSE_MAX_CONNECTIONS', process.env.SSE_MAX_CONNECTIONS, 0, { min: 0, integer: true }),
+    /** Interval for shared SSE auth sweep (re-check revocations, blocklists). */
+    authSweepIntervalMs: parseNumericEnv('SSE_AUTH_SWEEP_INTERVAL_MS', process.env.SSE_AUTH_SWEEP_INTERVAL_MS, 30000, { min: 1, integer: true }),
+  },
+
+  // ── Wallet / cache settings ───────────────────────────────────────────
+  /** TTL for wallet blocklist cache entries (ms). */
+  walletBlocklistCacheTtlMs: parseNumericEnv('WALLET_BLOCKLIST_CACHE_TTL_MS', process.env.WALLET_BLOCKLIST_CACHE_TTL_MS, 30000, { min: 1, integer: true }),
+  
+  /** TTL for feature flag cache entries (ms). */
+  featureFlagCacheTtlMs: parseNumericEnv('FEATURE_FLAG_CACHE_TTL_MS', process.env.FEATURE_FLAG_CACHE_TTL_MS, 5000, { min: 1, integer: true }),
+
+  // ── In-memory cache limits ────────────────────────────────────────────
+  /** Max entries in generic cache stores (LRU eviction). */
+  cacheMaxSize: parseNumericEnv('CACHE_MAX_SIZE', process.env.CACHE_MAX_SIZE, 1000, { min: 1, integer: true }),
+  cacheMaxEntries: parseNumericEnv('CACHE_MAX_ENTRIES', process.env.CACHE_MAX_ENTRIES, 1000, { min: 1, integer: true }),
+  playerCacheMaxSize: parseNumericEnv('PLAYER_CACHE_MAX_SIZE', process.env.PLAYER_CACHE_MAX_SIZE, 1000, { min: 1, integer: true }),
+
+  // ── GraphQL DataLoader concurrency ────────────────────────────────────
+  /** Max in-flight RPC calls for the milestone GraphQL DataLoader. */
+  milestoneLoaderConcurrency: parseNumericEnv('MILESTONE_LOADER_CONCURRENCY', process.env.MILESTONE_LOADER_CONCURRENCY, 8, { min: 1, integer: true }),
+
+  // ── Reindexing / catch-up mode ────────────────────────────────────────
+  /** Ledger lag threshold for entering catch-up mode (ledgers). */
+  reindexCatchupThreshold: parseNumericEnv('REINDEX_CATCHUP_THRESHOLD', process.env.REINDEX_CATCHUP_THRESHOLD, 500, { min: 1, integer: true }),
+  /** Ledgers processed per batch in catch-up mode. */
+  reindexCatchupBatchSize: parseNumericEnv('REINDEX_CATCHUP_BATCH_SIZE', process.env.REINDEX_CATCHUP_BATCH_SIZE, 500, { min: 1, integer: true }),
+  /** Ledgers processed per batch in steady-state mode. */
+  reindexBatchSize: parseNumericEnv('REINDEX_BATCH_SIZE', process.env.REINDEX_BATCH_SIZE, 100, { min: 1, integer: true }),
+  /** Delay between reindex batches (ms). */
+  reindexBatchDelayMs: parseNumericEnv('REINDEX_BATCH_DELAY_MS', process.env.REINDEX_BATCH_DELAY_MS, 50, { min: 0, integer: true }),
+  /** Backoff when RPC returns rate-limit errors during reindex (ms). */
+  reindexRateLimitBackoffMs: parseNumericEnv('REINDEX_RATE_LIMIT_BACKOFF_MS', process.env.REINDEX_RATE_LIMIT_BACKOFF_MS, 2000, { min: 1, integer: true }),
+
+  // ── Indexer settings ──────────────────────────────────────────────────
+  /** Finality margin: ledgers to hold back from tip to avoid reorgs. */
+  indexerFinalityMargin: parseNumericEnv('INDEXER_FINALITY_MARGIN', process.env.INDEXER_FINALITY_MARGIN, 10, { min: 1, integer: true }),
+  /** Ledger lag threshold before warning logs are emitted. */
+  indexerLagWarnThreshold: parseNumericEnv('INDEXER_LAG_WARN_THRESHOLD', process.env.INDEXER_LAG_WARN_THRESHOLD, 100, { min: 1, integer: true }),
+
+  // ── Proxy settings ────────────────────────────────────────────────────
+  /** Number of trusted reverse-proxy hops in front of this server (for IP resolution). */
+  trustedProxyCount: parseNumericEnv('TRUSTED_PROXY_COUNT', process.env.TRUSTED_PROXY_COUNT, 1, { min: 1, integer: true }),
+
+  // ── Database query monitoring ─────────────────────────────────────────
+  /** Log queries slower than this threshold (ms). */
+  slowQueryThresholdMs: parseNumericEnv('SLOW_QUERY_THRESHOLD_MS', process.env.SLOW_QUERY_THRESHOLD_MS, 50, { min: 0, integer: true }),
+
+  // ── Circuit breakers ──────────────────────────────────────────────────
+  // Default circuit breaker thresholds for generic outbound calls (Stellar RPC, etc.).
+  circuitBreaker: {
+    failureThreshold: parseNumericEnv('CIRCUIT_BREAKER_FAILURE_THRESHOLD', process.env.CIRCUIT_BREAKER_FAILURE_THRESHOLD, 5, { min: 1, integer: true }),
+    resetTimeoutMs: parseNumericEnv('CIRCUIT_BREAKER_RESET_TIMEOUT_MS', process.env.CIRCUIT_BREAKER_RESET_TIMEOUT_MS, 30000, { min: 1, integer: true }),
+  },
+  // IPFS pinning circuit breaker (often tighter than generic).
+  ipfsBreaker: {
+    failureThreshold: parseNumericEnv('IPFS_BREAKER_FAILURE_THRESHOLD', process.env.IPFS_BREAKER_FAILURE_THRESHOLD, 5, { min: 1, integer: true }),
+    resetTimeoutMs: parseNumericEnv('IPFS_BREAKER_RESET_TIMEOUT_MS', process.env.IPFS_BREAKER_RESET_TIMEOUT_MS, 30000, { min: 1, integer: true }),
+  },
+
+  // ── Database migration validation (#1318) ─────────────────────────────
+  /** Migration checksum policy: "strict" fails startup on mismatch (prod), "warn" logs and continues (dev). */
+  migrationChecksumMode: (() => {
+    const mode = (process.env.MIGRATION_CHECKSUM_MODE ?? '').toLowerCase();
+    const valid = ['strict', 'warn'] as const;
+    const validStr = valid as readonly string[];
+    if (mode && !validStr.includes(mode)) {
+      throw new Error(`Invalid MIGRATION_CHECKSUM_MODE="${mode}". Must be one of: ${valid.join(', ')}`);
+    }
+    // Default: strict in production, warn in dev/staging/test
+    if (mode) return mode as typeof valid[number];
+    return nodeEnv === 'production' ? 'strict' : 'warn';
+  })(),
+
+  // ── Rate limiter failure policy (#1320) ────────────────────────────────
+  /**
+   * When the rate limiter's store (Redis) fails, what to do:
+   * - 'open': allow requests (fail-open, availability over security)
+   * - 'closed': reject with 503 (fail-closed, security over availability)
+   * - 'local': fall back to per-instance in-memory counters (hybrid)
+   * Default: 'open' for general routes, 'closed' for auth endpoints.
+   */
+  rateLimitErrorPolicy: (() => {
+    const policy = (process.env.RATE_LIMIT_ERROR_POLICY ?? '').toLowerCase();
+    const valid = ['open', 'closed', 'local'] as const;
+    const validStr = valid as readonly string[];
+    if (policy && !validStr.includes(policy)) {
+      throw new Error(`Invalid RATE_LIMIT_ERROR_POLICY="${policy}". Must be one of: ${valid.join(', ')}`);
+    }
+    return policy as typeof valid[number] | '';
+  })(),
+
+  authRateLimitErrorPolicy: (() => {
+    const policy = (process.env.AUTH_RATE_LIMIT_ERROR_POLICY ?? '').toLowerCase();
+    const valid = ['open', 'closed', 'local'] as const;
+    const validStr = valid as readonly string[];
+    if (policy && !validStr.includes(policy)) {
+      throw new Error(`Invalid AUTH_RATE_LIMIT_ERROR_POLICY="${policy}". Must be one of: ${valid.join(', ')}`);
+    }
+    // Auth endpoints default to more restrictive: closed in production, local elsewhere
+    if (policy) return policy as typeof valid[number];
+    return nodeEnv === 'production' ? 'closed' : 'local';
+  })(),
+
 };
 
 export default config;
