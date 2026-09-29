@@ -79,6 +79,46 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
     expect(mockedDispatch).toHaveBeenCalledWith('milestone_approved', { player_id: 'P3' });
   });
 
+  it('does not repeat side effects when a poll returns an already-indexed event', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const dbModule = require('../../src/db');
+    const updateProgressSpy = jest.spyOn(dbModule, 'updatePlayerProgress');
+    const event = makeEvent(
+      'milestone_approved',
+      { player_id: 'P-REPLAY' },
+      `hash-replay-${Math.random().toString(36).slice(2)}`,
+      200_000 + Math.floor(Math.random() * 100_000),
+    );
+    server.getEvents.mockResolvedValue({ latestLedger: event.ledger, events: [event] });
+
+    await indexEvents();
+    await indexEvents();
+
+    expect(updateProgressSpy).toHaveBeenCalledTimes(1);
+    expect(mockedInvalidatePlayerCache).toHaveBeenCalledTimes(1);
+    expect(mockedDispatch).toHaveBeenCalledTimes(1);
+    updateProgressSpy.mockRestore();
+  });
+
+  it('scans stored approvals once when processing a batch of approvals', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const dbModule = require('../../src/db');
+    const queryEventsSpy = jest.spyOn(dbModule, 'queryEvents');
+    server.getEvents.mockResolvedValue({
+      events: [
+        makeEvent('milestone_approved', { player_id: 'P-COUNT' }, 'hash-count-001', 120),
+        makeEvent('milestone_approved', { player_id: 'P-COUNT' }, 'hash-count-002', 121),
+        makeEvent('milestone_approved', { player_id: 'P-COUNT' }, 'hash-count-003', 122),
+      ],
+    });
+
+    await indexEvents();
+
+    expect(queryEventsSpy).toHaveBeenCalledTimes(1);
+    expect(queryEventsSpy).toHaveBeenCalledWith('milestone_approved');
+    queryEventsSpy.mockRestore();
+  });
+
   it('does not dispatch a webhook for non-milestone_approved events', async () => {
     server.getEvents.mockResolvedValue({
       events: [makeEvent('player_registered', { player_id: 'P1', wallet: 'GWALLETP1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }, 'hash-005')],

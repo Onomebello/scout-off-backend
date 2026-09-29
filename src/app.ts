@@ -196,6 +196,7 @@ app.use(securityHeaders);
 app.use(responseTime);
 // Set API-Version (canonical) and X-API-Version (deprecated alias) on every response
 app.use(apiVersion);
+app.use(versionRouting);
 // Configure Express body parser with per-route JSON payload size limits.
 // Upload endpoints (player registration, milestone evidence) accept larger payloads.
 // Auth endpoints are restricted to prevent DoS via large JWT bodies.
@@ -254,10 +255,17 @@ app.get('/health', async (_req, res) => {
  *   READINESS_STELLAR_TIMEOUT_MS (default: 5 000)
  */
 function getReadinessTimeouts(): { db: number; ipfs: number; stellar: number } {
+  const parseTimeout = (name: string, fallback: number): number => {
+    const raw = process.env[name];
+    if (raw === undefined) return fallback;
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  };
+
   return {
-    db: parseInt(process.env.READINESS_DB_TIMEOUT_MS ?? '2000', 10),
-    ipfs: parseInt(process.env.READINESS_IPFS_TIMEOUT_MS ?? '5000', 10),
-    stellar: parseInt(process.env.READINESS_STELLAR_TIMEOUT_MS ?? '5000', 10),
+    db: parseTimeout('READINESS_DB_TIMEOUT_MS', 2_000),
+    ipfs: parseTimeout('READINESS_IPFS_TIMEOUT_MS', 5_000),
+    stellar: parseTimeout('READINESS_STELLAR_TIMEOUT_MS', 5_000),
   };
 }
 
@@ -270,8 +278,10 @@ async function checkReadiness(): Promise<Record<string, ProbeResult>> {
   const timeouts = getReadinessTimeouts();
 
   const [dbResult, ipfsResult, stellarResult, indexerResult] = await Promise.all([
-    (async (): Promise<'ok' | 'unavailable'> => {
-      return (await probeDbWritable()) === 'ok' ? 'ok' : 'unavailable';
+    (async (): Promise<ProbeResult> => {
+      const t0 = Date.now();
+      const outcome = await probeDbWritable(timeouts.db);
+      return { status: outcome === 'ok' ? 'ok' : 'unavailable', ms: Date.now() - t0 };
     })(),
 
     // IPFS probe — Pinata connectivity
@@ -318,7 +328,7 @@ async function checkReadiness(): Promise<Record<string, ProbeResult>> {
   ]);
 
   const services: Record<string, ProbeResult> = {
-    db: { status: dbResult, ms: 0 },
+    db: dbResult,
     ipfs: ipfsResult,
     stellar: stellarResult,
     indexer: { status: indexerResult, ms: 0 },

@@ -1,6 +1,8 @@
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import app from '../../src/app';
+import config from '../../src/config';
+import { logger } from '../../src/utils/logger';
 
 const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 
@@ -478,6 +480,26 @@ describe('API version response headers', () => {
     expect(res.headers['api-version']).toBeDefined();
     expect(res.headers['x-api-version']).toBeDefined();
     expect(res.headers['api-version']).toBe(res.headers['x-api-version']);
+  });
+
+  it('reports header-negotiated version 2 on the API-Version response header', async () => {
+    const res = await request(app).get('/api/players').set('API-Version', '2');
+    expect(res.headers['api-version']).toBe('2');
+  });
+
+  it('warns when an unversioned API path is used in production', async () => {
+    const previousNodeEnv = config.nodeEnv;
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    (config as { nodeEnv: string }).nodeEnv = 'production';
+    try {
+      await request(app).get('/api/players');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Unversioned /api/ path called: GET /api/players'),
+      );
+    } finally {
+      (config as { nodeEnv: string }).nodeEnv = previousNodeEnv;
+      warnSpy.mockRestore();
+    }
   });
 });
 

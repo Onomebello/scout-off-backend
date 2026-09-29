@@ -288,6 +288,53 @@ describe('GET /health', () => {
   });
 });
 
+describe('readiness DB probe timeout and latency', () => {
+  const originalTimeout = process.env.READINESS_DB_TIMEOUT_MS;
+
+  afterEach(() => {
+    if (originalTimeout === undefined) {
+      delete process.env.READINESS_DB_TIMEOUT_MS;
+    } else {
+      process.env.READINESS_DB_TIMEOUT_MS = originalTimeout;
+    }
+    mockGetDriver.mockReset();
+    mockGetDriver.mockImplementation(getRealDriver);
+    mockCheckHealth.mockReset();
+  });
+
+  it('uses the configured timeout and reports the DB probe duration', async () => {
+    process.env.READINESS_DB_TIMEOUT_MS = '30';
+    mockCheckHealth.mockResolvedValue(undefined);
+    mockGetDriver.mockImplementation(() =>
+      driverWith({ run: () => new Promise(() => {}) }),
+    );
+
+    const startedAt = Date.now();
+    const res = await request(app).get('/ready');
+
+    expect(res.status).toBe(503);
+    expectProbeStatus(res.body.services.db, 'unavailable');
+    expect(res.body.services.db.ms).toBeGreaterThanOrEqual(20);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it('falls back to the default timeout for an invalid setting', async () => {
+    process.env.READINESS_DB_TIMEOUT_MS = 'not-a-number';
+    mockCheckHealth.mockResolvedValue(undefined);
+    mockGetDriver.mockImplementation(() =>
+      driverWith({
+        run: () => new Promise((resolve) => setTimeout(() => resolve({ changes: 1, lastId: 0 }), 30)),
+      }),
+    );
+
+    const res = await request(app).get('/ready');
+
+    expect(res.status).toBe(200);
+    expectProbeStatus(res.body.services.db, 'ok');
+    expect(res.body.services.db.ms).toBeGreaterThanOrEqual(20);
+  });
+});
+
 describe('GET /ready and GET /health/readiness return identical responses', () => {
   afterEach(() => {
     mockCheckHealth.mockReset();
