@@ -20,7 +20,12 @@ The migration is reversible within a maintenance window.
 > PDB disabled). Horizontal scaling (multiple replicas or the HPA) requires
 > PostgreSQL — switch `env.DB_DRIVER` to `postgres` and provide
 > `env.DATABASE_URL` **before** scaling. The chart loudly warns in its
-> NOTES.txt output if you scale while still on SQLite. See DEPLOYMENT.md.
+> NOTES.txt output if you scale while still on SQLite. The chart mounts
+> `/data` as an `emptyDir` by default; set `dataVolume.persistentVolumeClaim`
+> to an existing claim to preserve SQLite data across pod replacement. Its
+> default NetworkPolicy allows ingress only from pods in the release namespace;
+> add external ingress-controller peers through `networkPolicy.additionalIngressFrom`.
+> See DEPLOYMENT.md.
 
 ## Prerequisites
 
