@@ -144,7 +144,7 @@ interface ActiveSession {
   jti: string | undefined;
   subscriber: SseSubscriber;
   /** Terminate the connection; safe to call more than once. */
-  terminate: (reason: 'token_revoked' | 'wallet_blocklisted' | 'token_expired') => void;
+  terminate: (reason: 'token_revoked' | 'wallet_blocklisted' | 'token_expired' | 'server_shutdown') => void;
 }
 
 /** Sessions currently open in this process. */
@@ -181,6 +181,34 @@ export async function runAuthorizationSweep(): Promise<void> {
 // Started lazily on first connection; unref()ed so it never keeps the process
 // alive; skips all work when no SSE sessions are open.
 let authSweepTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Drain all active SSE sessions for a graceful shutdown.
+ * Sends a `session_ended` frame with `reason: server_shutdown` to every
+ * connected client, ends each response, and clears the activeSessions set.
+ * Safe to call multiple times (no-op when already empty).
+ */
+export function drainAllSessions(): void {
+  if (activeSessions.size === 0) return;
+  logger.info(`[sse] draining ${activeSessions.size} session(s) for shutdown`);
+  for (const session of [...activeSessions]) {
+    try {
+      session.terminate('server_shutdown' as Parameters<typeof session.terminate>[0]);
+    } catch (err) {
+      logger.warn(`[sse] error terminating session wallet=${session.wallet}:`, err);
+    }
+  }
+  activeSessions.clear();
+}
+
+/**
+ * Return `true` when the server is accepting new SSE connections.
+ * Set to `false` during graceful shutdown so new connections are rejected
+ * with 503 before server.close() drains keep-alive idle connections.
+ */
+let _acceptingSseSessions = true;
+export function setAcceptingSseSessions(v: boolean): void { _acceptingSseSessions = v; }
+export function isAcceptingSseSessions(): boolean { return _acceptingSseSessions; }
 
 // ─── Route ────────────────────────────────────────────────────────────────────
 
@@ -245,6 +273,15 @@ let authSweepTimer: NodeJS.Timeout | null = null;
  */
 router.get('/stream', requireAuth, async (req: Request, res: Response) => {
   const wallet = req.account!;
+
+  // ── Draining guard: reject new SSE connections during shutdown ────────────
+  if (!isAcceptingSseSessions()) {
+    res.status(503).json({
+      success: false,
+      error: 'Server is shutting down; no new SSE connections are accepted',
+    });
+    return;
+  }
 
   // ── Blocklist gate: blocklisted wallets may not open a stream ────────────
   if (await isWalletBlocklisted(wallet)) {
@@ -334,7 +371,7 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
     logger.info(`[sse] client disconnected wallet=${wallet} total=${broadcaster.subscriberCount}`);
   };
 
-  const terminate = (reason: 'token_revoked' | 'wallet_blocklisted' | 'token_expired'): void => {
+  const terminate = (reason: 'token_revoked' | 'wallet_blocklisted' | 'token_expired' | 'server_shutdown'): void => {
     if (terminated || res.writableEnded) return;
     logger.warn(`[sse] terminating session wallet=${wallet} reason=${reason}`);
     try {

@@ -1,9 +1,10 @@
-import { rpc, Contract, Address } from '@stellar/stellar-sdk';
+import { rpc, Contract, Address, nativeToScVal } from '@stellar/stellar-sdk';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import {
   PaymentError,
   createTxBuilder,
+  isContractPausedError,
   sendTransactionWithCorrelation,
   server,
 } from './stellarCore';
@@ -15,15 +16,139 @@ export interface UpdatePlatformFeeResult {
   newFeeBps: number;
 }
 
+export type UpdatePlatformFeeErrorCode =
+  | 'INVALID_INPUT'
+  | 'UNAUTHORIZED'
+  | 'CONTRACT_PAUSED'
+  | 'NOT_INITIALIZED'
+  | 'NETWORK_ERROR';
+
+export class UpdatePlatformFeeError extends Error {
+  constructor(
+    message: string,
+    public readonly code: UpdatePlatformFeeErrorCode,
+  ) {
+    super(message);
+    this.name = 'UpdatePlatformFeeError';
+  }
+}
+
 /**
- * Stub for the admin-only `set_platform_fee_bps(new_bps: u32)` contract call.
- * Valid range: 0–10000 bps.
+ * Invoke `set_platform_fee_bps(admin: Address, platform_fee_bps: u32)` on the
+ * Soroban subscription contract via the platform keypair.
+ *
+ * The subscription contract is the single authoritative source for the
+ * platform fee — the register contract's setter was removed in #1314.
+ *
+ * Flow: getAccount → build tx → simulateTransaction → assembleTransaction
+ *   → sign → sendTransaction → poll getTransaction until final status.
+ *
+ * On success returns the confirmed transaction hash and the new fee bps.
+ * Throws UpdatePlatformFeeError with code:
+ *   'INVALID_INPUT'    — newFeeBps out of range 0–10000
+ *   'UNAUTHORIZED'     — platform keypair is not the contract admin
+ *   'CONTRACT_PAUSED'  — contract error #10
+ *   'NOT_INITIALIZED'  — contract has not been initialized
+ *   'NETWORK_ERROR'    — RPC/transport failure or on-chain rejection
  */
 export async function updatePlatformFee(newFeeBps: number): Promise<UpdatePlatformFeeResult> {
-  if (newFeeBps < 0 || newFeeBps > 10000) {
-    throw new Error('newFeeBps must be between 0 and 10000');
+  if (!Number.isInteger(newFeeBps) || newFeeBps < 0 || newFeeBps > 10000) {
+    throw new UpdatePlatformFeeError('newFeeBps must be an integer between 0 and 10000', 'INVALID_INPUT');
   }
-  return { transactionId: `stub-fee-txid-${Date.now()}`, newFeeBps };
+
+  return tracer.startActiveSpan('stellar.updatePlatformFee', async (span) => {
+    span.setAttribute('stellar.contract_function', 'set_platform_fee_bps');
+    span.setAttribute('stellar.new_fee_bps', newFeeBps);
+    try {
+      const { getPlatformKeypair } = await import('../utils/signer');
+      const keypair = getPlatformKeypair();
+
+      let account;
+      try {
+        account = await server.getAccount(keypair.publicKey());
+      } catch (err) {
+        throw new UpdatePlatformFeeError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      const contract = new Contract(config.subscriptionContractId);
+
+      const tx = createTxBuilder(account)
+        .addOperation(
+          contract.call(
+            'set_platform_fee_bps',
+            Address.fromString(keypair.publicKey()).toScVal(),
+            nativeToScVal(newFeeBps, { type: 'u32' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      let simResult;
+      try {
+        simResult = await server.simulateTransaction(tx);
+      } catch (err) {
+        throw new UpdatePlatformFeeError(`Simulation request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      if (rpc.Api.isSimulationError(simResult)) {
+        const errMsg = simResult.error ?? '';
+        if (isContractPausedError(errMsg)) {
+          throw new UpdatePlatformFeeError('Contract is paused; fee updates are unavailable', 'CONTRACT_PAUSED');
+        }
+        if (/#5\b/.test(errMsg) || /unauthorized/i.test(errMsg)) {
+          throw new UpdatePlatformFeeError('Platform keypair is not authorized to set fee', 'UNAUTHORIZED');
+        }
+        if (/#1\b/.test(errMsg) || /not.?initialized/i.test(errMsg)) {
+          throw new UpdatePlatformFeeError('Contract is not initialized', 'NOT_INITIALIZED');
+        }
+        if (/#3\b/.test(errMsg) || /invalid.?input/i.test(errMsg)) {
+          throw new UpdatePlatformFeeError('Invalid fee value rejected by contract', 'INVALID_INPUT');
+        }
+        throw new UpdatePlatformFeeError(`Simulation failed: ${errMsg}`, 'NETWORK_ERROR');
+      }
+
+      const preparedTx = rpc.assembleTransaction(tx, simResult).build();
+      preparedTx.sign(keypair);
+
+      let sendResult;
+      try {
+        sendResult = await sendTransactionWithCorrelation(preparedTx);
+      } catch (err) {
+        throw new UpdatePlatformFeeError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+      if (sendResult.status === 'ERROR') {
+        throw new UpdatePlatformFeeError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
+      }
+
+      const hash = sendResult.hash;
+      span.setAttribute('stellar.tx_hash', hash);
+
+      let getResult;
+      try {
+        getResult = await server.getTransaction(hash);
+        while (getResult.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
+          await new Promise((r) => setTimeout(r, 1000));
+          getResult = await server.getTransaction(hash);
+        }
+      } catch (err) {
+        throw new UpdatePlatformFeeError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      if (getResult.status === rpc.Api.GetTransactionStatus.FAILED) {
+        throw new UpdatePlatformFeeError('set_platform_fee_bps transaction failed on-chain', 'NETWORK_ERROR');
+      }
+
+      span.setAttribute('stellar.status', 'success');
+      return { transactionId: hash, newFeeBps };
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+      span.setAttribute('error.type', (err as Error).name);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 export interface ContractActionResult {

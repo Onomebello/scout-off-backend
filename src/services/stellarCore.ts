@@ -13,6 +13,7 @@ import {
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { correlationMemoFromContext, recordTxCorrelation } from './txCorrelation';
+import { getRequestSignal } from '../utils/requestContext';
 
 import { stellarBreaker } from '../utils/circuitBreaker';
 import { getPlayerById } from '../db';
@@ -70,6 +71,12 @@ export function createTxBuilder(sourceAccount: Account): TransactionBuilder {
 export async function sendTransactionWithCorrelation(
   preparedTx: ReturnType<TransactionBuilder['build']>,
 ) {
+  // If the client disconnected or the request timed out, do not submit the
+  // irreversible transaction: the client believes it failed and may retry.
+  const signal = getRequestSignal();
+  if (signal?.aborted) {
+    throw new Error('Request aborted before transaction submission');
+  }
   const sendResult = await server.sendTransaction(preparedTx);
   if (sendResult.hash) {
     recordTxCorrelation(sendResult.hash);
