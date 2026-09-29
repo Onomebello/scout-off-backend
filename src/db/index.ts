@@ -1324,9 +1324,28 @@ export interface IdempotencyRecord {
    * endpoints that don't opt into fingerprint conflict detection.
    */
   request_fingerprint: string | null;
+  /**
+   * Lease expiry (Unix ms). While status='pending' and locked_until > now,
+   * concurrent callers cannot re-claim this key. NULL means no lease (legacy).
+   */
+  locked_until?: number | null;
+}
+
+/**
+ * Delete a pending idempotency record without persisting a response.
+ * Used when a streaming handler calls res.end without res.json, or when the
+ * request handler throws before sending a response. Releases the lease so the
+ * key can be re-used immediately by a retry.
+ */
+export async function releaseIdempotencyKey(key: string): Promise<void> {
+  const sql = 'DELETE FROM idempotency_keys WHERE key = ? AND status = ?';
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [key, 'pending'])
+  );
 }
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const IDEMPOTENCY_LEASE_MS = config.idempotencyLeaseMs; // Lease expiry (ms)
 
 /**
  * Look up a non-expired idempotency key regardless of its status.
@@ -1341,50 +1360,124 @@ export async function getIdempotencyRecord(key: string): Promise<IdempotencyReco
 }
 
 /**
- * Attempt to claim an idempotency key by inserting a 'pending' marker.
+ * Attempt to claim an idempotency key by inserting a 'pending' marker, or
+ * re-claiming an expired lease. The lease mechanism allows a crashed or hung
+ * request to release its claim so a retry can proceed before the 24 h TTL.
  *
- * Uses INSERT OR IGNORE so that the insert is a single atomic operation:
- * exactly one concurrent request will succeed and receive `true`; every
- * other request for the same key receives `false` and must not run the
- * downstream handler.
+ * Atomic UPDATE that transitions a pending record whose lease has expired
+ * (locked_until < now) to a fresh pending record with a new lease, or inserts
+ * a new row if the key is absent or fully expired.
+ *
+ * Uses a single SQL statement so concurrent callers cannot race to grab the
+ * same expired record.
  *
  * Returns true  — this caller owns the key; proceed with the handler.
- * Returns false — another request already claimed the key; caller must wait.
+ * Returns false — another request owns the key (either still pending with
+ *                 an active lease, or complete with a valid cached response).
  */
 export async function claimIdempotencyKey(
   key: string,
   requestFingerprint?: string | null,
 ): Promise<boolean> {
   const now = Date.now();
-  const sql = `
-    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status, request_fingerprint)
-    VALUES (?, 0, '', ?, ?, 'pending', ?)
+  const lockedUntil = now + IDEMPOTENCY_LEASE_MS;
+  const expiresAt = now + IDEMPOTENCY_TTL_MS;
+
+  // First try to re-claim an expired pending record. If that succeeds, we own
+  // the key. If not, fall back to a normal INSERT OR IGNORE.
+  const reclaimSql = `
+    UPDATE idempotency_keys
+    SET status_code = 0,
+        response = '',
+        status = 'pending',
+        created_at = ?,
+        locked_until = ?,
+        expires_at = ?,
+        request_fingerprint = ?
+    WHERE key = ?
+      AND status = 'pending'
+      AND (locked_until IS NULL OR locked_until < ?)
+    `;
+  const insertSql = `
+    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status, locked_until, request_fingerprint)
+    VALUES (?, 0, '', ?, ?, 'pending', ?, ?)
     ON CONFLICT (key) DO NOTHING
   `;
-  const result = await timedQueryAsync(sql, () =>
-    getDriver().run(sql, [key, now, now + IDEMPOTENCY_TTL_MS, requestFingerprint ?? null])
+
+  // Attempt reclaim first (SQLite: no RETURNING, so we check changes)
+  const reclaimResult = await timedQueryAsync(reclaimSql, () =>
+    getDriver().run(reclaimSql, [now, lockedUntil, expiresAt, requestFingerprint ?? null, key, now])
   );
-  // changes === 1 means a new row was inserted (this caller won the race).
-  return result.changes === 1;
+
+  if (reclaimResult.changes === 1) {
+    return true;
+  }
+
+  // Reclaim didn't succeed; try a fresh insert
+  const insertResult = await timedQueryAsync(insertSql, () =>
+    getDriver().run(insertSql, [key, now, expiresAt, lockedUntil, requestFingerprint ?? null])
+  );
+
+  return insertResult.changes === 1;
 }
 
 /**
- * Transition a 'pending' idempotency key to 'complete', recording the final
- * response.  Called by the middleware after the handler has written its response.
+ * Transition a 'pending' idempotency key to 'complete', or delete it for
+ * transient failures.  Called by the middleware after the handler has written
+ * its response.
+ *
+ * Only persisted outcomes:
+ *   • 2xx (success)
+ *   • 4xx that are deterministic (exclude 408/409/423/429 which indicate
+ *     retryable conditions or client errors that should not be cached)
+ *
+ * Transient 5xx responses are NOT cached; the pending record is deleted so
+ * the client can retry with the same key.
  */
 export async function updateIdempotencyRecord(
   key: string,
   statusCode: number,
   body: unknown,
 ): Promise<void> {
-  const sql = `
-    UPDATE idempotency_keys
-    SET status_code = ?, response = ?, status = 'complete'
-    WHERE key = ?
-  `;
-  await timedQueryAsync(sql, () =>
-    getDriver().run(sql, [statusCode, JSON.stringify(body), key])
-  );
+  const shouldCache = isDeterministicOutcome(statusCode);
+
+  if (shouldCache) {
+    const sql = `
+      UPDATE idempotency_keys
+      SET status_code = ?, response = ?, status = 'complete'
+      WHERE key = ?
+    `;
+    await timedQueryAsync(sql, () =>
+      getDriver().run(sql, [statusCode, JSON.stringify(body), key])
+    );
+  } else {
+    // For transient failures (5xx) and retryable client errors (408/409/423/429),
+    // delete the pending record so the client can retry with the same key.
+    const sql = 'DELETE FROM idempotency_keys WHERE key = ? AND status = ?';
+    await timedQueryAsync(sql, () =>
+      getDriver().run(sql, [key, 'pending'])
+    );
+  }
+}
+
+/**
+ * Returns true when the response should be cached for idempotency replay.
+ *
+ * 2xx: always cache (successful outcomes are deterministic).
+ * 4xx: cache only if not retryable (exclude 408/409/423/429).
+ * 5xx: never cache (transient server errors should be retryable).
+ */
+function isDeterministicOutcome(statusCode: number): boolean {
+  if (statusCode >= 200 && statusCode < 300) {
+    return true;
+  }
+  if (statusCode >= 400 && statusCode < 500) {
+    // 408 (Request Timeout), 409 (Conflict), 423 (Locked), 429 (Too Many Requests)
+    // are all retryable or indicate a client action is needed; don't cache.
+    return ![408, 409, 423, 429].includes(statusCode);
+  }
+  // 5xx are transient; clients should retry.
+  return false;
 }
 
 /**
@@ -1404,12 +1497,12 @@ export async function saveIdempotencyRecord(
 ): Promise<void> {
   const now = Date.now();
   const sql = `
-    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status)
-    VALUES (?, ?, ?, ?, ?, 'complete')
+    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status, locked_until)
+    VALUES (?, ?, ?, ?, ?, 'complete', ?)
     ON CONFLICT(key) DO NOTHING
   `;
   await timedQueryAsync(sql, () =>
-    getDriver().run(sql, [key, statusCode, JSON.stringify(body), now, now + IDEMPOTENCY_TTL_MS])
+    getDriver().run(sql, [key, statusCode, JSON.stringify(body), now, now + IDEMPOTENCY_TTL_MS, null])
   );
 }
 
