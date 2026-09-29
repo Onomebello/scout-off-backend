@@ -837,6 +837,7 @@ Operator topics (secrets rotation, data privacy, Postgres migration, deployment)
 | `ADMIN_IP_ALLOWLIST`              | Comma-separated list of IPv4 addresses/CIDRs allowed on admin routes (unset = allow all)                              |
 | `SLOW_QUERY_THRESHOLD_MS`         | Log a structured warning for DB queries slower than this, in milliseconds (default: `50`)                             |
 | `SSE_KEEPALIVE_INTERVAL_MS`       | Interval in milliseconds to send SSE keep-alive comments (default: `15000` = 15 seconds)                              |
+| `SSE_MAX_CONNECTIONS_PER_WALLET` | Maximum simultaneous SSE streams per wallet (default: `5`; `0` = unlimited)                                           |
 | `SSE_MAX_CONNECTIONS`             | Maximum number of concurrent SSE connections (default: `0` = unlimited)                                               |
 | `SSE_RETRY_MS`                     | Base reconnection delay in milliseconds sent to SSE clients in `retry:` frame (default: `5000` = 5 seconds)             |
 | `READINESS_DB_TIMEOUT_MS`         | Per-probe timeout for DB readiness heartbeat check, in milliseconds (default: `2000`)                                  |

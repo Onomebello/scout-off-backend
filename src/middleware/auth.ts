@@ -123,6 +123,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       req.account = payload.sub;
       req.role = payload.role;
       req.jti = payload.jti;
+      req.tokenExpiresAt = payload.exp;
       next();
     }).catch(() => {
       // Revocation check failed — fail open (allow request) to avoid blocking
@@ -131,6 +132,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       req.account = payload.sub;
       req.role = payload.role;
       req.jti = payload.jti;
+      req.tokenExpiresAt = payload.exp;
       next();
     });
   } catch (err) {
@@ -198,11 +200,13 @@ export function requireRole(...allowedRoles: string[]) {
         req.account = payload.sub;
         req.role = payload.role;
         req.jti = payload.jti;
+        req.tokenExpiresAt = payload.exp;
         next();
       }).catch(() => {
         req.account = payload.sub;
         req.role = payload.role;
         req.jti = payload.jti;
+        req.tokenExpiresAt = payload.exp;
         next();
       });
     } catch (err) {
@@ -225,6 +229,7 @@ export function optionalAuth(req: Request, _res: Response, next: NextFunction): 
       req.account = payload.sub;
       req.role = payload.role;
       req.jti = payload.jti;
+      req.tokenExpiresAt = payload.exp;
     } catch {
       // Invalid/expired token — treat the request as anonymous
     }
@@ -303,6 +308,7 @@ export function requireRoles(...roles: string[]) {
       req.account = payload.sub;
       req.role = payload.role;
       req.jti = payload.jti;
+      req.tokenExpiresAt = payload.exp;
       next();
     } catch (err) {
       sendUnauthorized(res, 'Invalid or expired token', undefined, tokenErrorCode(err));

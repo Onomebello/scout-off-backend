@@ -43,7 +43,8 @@ Response codes:
 | `200`  | Stream opened; frames start arriving                                    |
 | `401`  | Missing or invalid token (`{ success: false, error }`)                  |
 | `403`  | Wallet is blocklisted — stream access revoked (`code: WALLET_BLOCKLISTED`) |
-| `503`  | Connection limit reached (`SSE_MAX_CONNECTIONS`) — `code: SSE_CAPACITY`; retry after the `Retry-After` header (seconds) |
+| `429`  | Per-wallet stream limit reached (`SSE_MAX_CONNECTIONS_PER_WALLET`)       |
+| `503`  | Process-wide stream limit reached (`SSE_MAX_CONNECTIONS`) — `code: SSE_CAPACITY`; retry after the `Retry-After` header (seconds) |
 
 ## Connecting
 
@@ -153,7 +154,7 @@ Other frames you may see:
 | -------------- | ----------------------------------------------- | ----------------------------------------- |
 | `retry:`       | Once, immediately on connect                    | Integer milliseconds (e.g. `5234`); sets client reconnect delay |
 | `connected`    | Once, immediately after the stream opens        | `{ "wallet": "<your wallet>" }`           |
-| `session_ended`| The stream is being closed (see live auth below)| `{ "reason": "token_revoked" \| "wallet_blocklisted" }` |
+| `session_ended`| The stream is being closed (see live auth below)| `{ "reason": "token_revoked" \| "wallet_blocklisted" \| "token_expired" }` |
 | `: ping`       | Keep-alive comment every `SSE_KEEPALIVE_INTERVAL_MS` (default 15 s) | — (comment only, ignored by EventSource) |
 
 The `data` field is JSON; parse it with `JSON.parse(e.data)`.
@@ -203,8 +204,10 @@ relevance check (wildcard behaviour).
 - **Compression:** gzip/br compression is **disabled** for the SSE paths
   (`/api/events/stream`, `/api/v1/events/stream`, `/api/v2/events/stream`) —
   SSE responses are written incrementally and compression would buffer them.
-- **Connection limit:** `SSE_MAX_CONNECTIONS` caps concurrent streams
-  (default `0` = unlimited). Exceeding it returns `503`.
+- **Connection limits:** `SSE_MAX_CONNECTIONS_PER_WALLET` caps concurrent
+  streams per wallet (default `5`; `0` = unlimited, exceeded limit returns
+  `429`). `SSE_MAX_CONNECTIONS` caps total process-wide streams (default `0` =
+  unlimited, exceeded limit returns `503`).
 
 ## Reconnection and replay behaviour (known limitations)
 
@@ -231,6 +234,8 @@ Once a stream is open, authorization is re-checked continuously (issue #1019):
   closes the connection.
 - If the wallet is blocklisted, the same happens with reason
   `wallet_blocklisted`.
+- When the access JWT expires, the stream emits `session_ended` with reason
+  `token_expired` and closes. Clients must reconnect with a fresh token.
 - Detection is immediate for revocations/blocklists processed in the same
   process, and within `SSE_AUTH_SWEEP_INTERVAL_MS` (default 30 s) for changes
   persisted by another backend instance. A blocklisted wallet also cannot open
@@ -245,6 +250,7 @@ for the full model.
 | --------------------------- | ------- | ------------------------------------------------------- |
 | `SSE_RETRY_MS`              | `5000`  | Base reconnect delay hint sent in `retry:` frame (ms)   |
 | `SSE_KEEPALIVE_INTERVAL_MS` | `15000` | Interval between keep-alive `: ping` comments (ms)      |
+| `SSE_MAX_CONNECTIONS_PER_WALLET` | `5` | Max concurrent streams per wallet; `0` = unlimited       |
 | `SSE_MAX_CONNECTIONS`       | `0`     | Max concurrent streams; `0` = unlimited                 |
 | `SSE_AUTH_SWEEP_INTERVAL_MS`| `30000` | Cross-process auth sweep interval (ms)                  |
 

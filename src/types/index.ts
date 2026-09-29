@@ -172,6 +172,8 @@ declare global {
       role?: string;
       /** JWT ID of the bearer token used for this request (set by auth middleware). */
       jti?: string;
+      /** JWT expiry as a Unix timestamp in seconds (set by auth middleware). */
+      tokenExpiresAt?: number;
       /**
        * Parsed API-key scopes when the request was authenticated via
        * X-API-Key. `null` = legacy/unrestricted key; `undefined` = the
