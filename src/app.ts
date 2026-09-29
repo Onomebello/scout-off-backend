@@ -127,7 +127,16 @@ const corsOptions: CorsOptions = {
     'X-API-Version',
     'API-Version',
   ],
-  exposedHeaders: ['ETag', 'X-Correlation-ID', 'X-Response-Time', 'API-Version', 'X-API-Version'],
+  exposedHeaders: [
+    'ETag',
+    'X-Correlation-ID',
+    'X-Response-Time',
+    'X-API-Version',
+    'API-Version',
+    'Location',
+    'Retry-After',
+    'X-RateLimit-Reputation-Limit',
+  ],
   // credentials cannot be used with a wildcard origin (CORS spec); only enable
   // it when we are using an explicit allowlist
   credentials: !isWildcard,
@@ -209,9 +218,11 @@ const defaultJsonParser = express.json({ limit: config.bodyLimit.json });
 
 const UPLOAD_PATHS = new Set([
   '/api/players/register', '/api/v1/players/register',
+  '/api/v2/players/register',
   '/api/validators/milestone', '/api/v1/validators/milestone',
+  '/api/v2/validators/milestone',
 ]);
-const AUTH_PATHS = new Set(['/auth/token', '/auth/challenge']);
+const AUTH_PATHS = new Set(['/auth/token', '/auth/challenge', '/auth/refresh', '/auth/logout']);
 
 app.use((req, res, next) => {
   if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
