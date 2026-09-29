@@ -17,9 +17,9 @@
 
 import Redis from 'ioredis';
 import { EventEmitter } from 'events';
-import config from '../config';
 import { logger } from '../utils/logger';
 import { getDriver } from '../db';
+import { getRedisClient } from './redis';
 
 // ─── In-process revocation events ────────────────────────────────────────────
 //
@@ -38,15 +38,7 @@ const REVOKED_EVENT = 'token_revoked';
 /** Narrow surface we need from ioredis — same pattern as redisCacheStore.ts */
 type RedisLike = Pick<Redis, 'setex' | 'exists' | 'keys' | 'set'>;
 
-let redisClient: RedisLike | null = null;
-
-if (config.redisUrl) {
-  const client = new Redis(config.redisUrl);
-  client.on('error', (err: Error) => {
-    logger.error('[tokenBlocklist] Redis client error:', err);
-  });
-  redisClient = client;
-}
+const redisClient: RedisLike | null = getRedisClient();
 
 // ─── Key helpers ──────────────────────────────────────────────────────────────
 
@@ -101,7 +93,7 @@ async function writeToRedis(jti: string, expiresAt: number): Promise<boolean> {
 async function checkRedis(jti: string): Promise<boolean | null> {
   if (!redisClient) return null;
   try {
-    const exists = await (redisClient as Redis).exists(redisKey(jti));
+    const exists = await redisClient.exists(redisKey(jti));
     return exists === 1;
   } catch (err) {
     logger.warn('[tokenBlocklist] Redis read failed, falling back to DB:', err);
