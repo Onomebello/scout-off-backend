@@ -79,6 +79,12 @@ jobs:
       - name: Validate OpenAPI spec is in sync with route sources
         run: npm run validate:openapi
 
+      - name: Validate generated TypeScript client
+        run: npm run validate:client
+
+      - name: Type check generated TypeScript client
+        run: npm run typecheck:client
+
       - name: Check for unsafe SQL string interpolation
         run: npm run check:sql-injection
 

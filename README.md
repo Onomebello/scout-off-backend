@@ -22,6 +22,7 @@ Stellar is the backbone: sub-cent transaction fees mean a scout in Europe can pa
 - **Subscription Model**: Scouts can hold an active subscription for unlimited browsing within a tier
 - **SEP-10 Auth**: Players and scouts log in securely with a Stellar wallet (Freighter, Albedo, or Lobstr)
 - **Auth docs**: See docs/auth.md for SEP-10 challenge flow, JWT lifecycle, token refresh, and example requests.
+- **Typed API client**: Use the versioned TypeScript client generated from the OpenAPI contract in [clients/typescript](clients/typescript/README.md).
 - **GraphQL docs**: See [docs/graphql.md](docs/graphql.md) for the read-only GraphQL endpoint, schema, limits, and authentication.
 - **Decentralized Storage**: Highlight reels and photos stored on IPFS; content hashes saved on-chain in the player's profile
 
@@ -804,6 +805,10 @@ Operator topics (secrets rotation, data privacy, Postgres migration, deployment)
 | `DB_PATH`                         | SQLite database file path (default: `scout-off.db`)                                                                   |
 | `DATABASE_URL`                    | PostgreSQL connection URL (required when `DB_DRIVER=postgres`)                                                        |
 | `DATABASE_SSL`                    | PostgreSQL SSL mode: `true`, `no-verify`, or `false` (default: `false`)                                               |
+| `SQLITE_BUSY_TIMEOUT_MS`          | SQLite lock-contention wait before returning `SQLITE_BUSY` (default: `5000`)                                          |
+| `DB_STATEMENT_TIMEOUT_MS`         | PostgreSQL server-side statement timeout in milliseconds (default: `25000`)                                           |
+| `DB_QUERY_TIMEOUT_MS`             | PostgreSQL client query timeout in milliseconds (default: `30000`)                                                    |
+| `DB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS` | PostgreSQL idle-in-transaction timeout in milliseconds (default: `60000`)                               |
 | `LOG_LEVEL`                       | Log verbosity: `debug`, `info`, `warn`, `error` (default: `info`)                                                     |
 | `LOG_SKIP_PATHS`                  | Comma-separated paths to skip in request logging (default: health and metrics probes)                                 |
 | `LOG_SAMPLE_RATE`                 | Sample rate for non-skipped paths (default: `1` = log all)                                                            |
@@ -817,7 +822,8 @@ Operator topics (secrets rotation, data privacy, Postgres migration, deployment)
 | `RATE_LIMIT_WINDOW_MS`            | Rate limit window in milliseconds (default: `60000`)                                                                  |
 | `RATE_LIMIT_MAX`                  | Max requests per window (default: `60`)                                                                               |
 | `AUTH_RATE_LIMIT_WINDOW_MS`       | Auth rate limit window in milliseconds (default: `60000`)                                                             |
-| `AUTH_RATE_LIMIT_MAX`             | Max auth requests per window (default: `5`)                                                                           |
+| `AUTH_RATE_LIMIT_MAX`             | Max auth requests per account and endpoint per window (default: `5`)                                                  |
+| `AUTH_RATE_LIMIT_IP_MAX`          | Max requests per auth endpoint per IP and window (default: `60`)                                                      |
 | `CORS_ALLOWED_ORIGINS`            | Comma-separated list of allowed origins (environment-specific defaults)                                               |
 | `TRUSTED_PROXY_COUNT`             | Number of trusted reverse-proxy hops (default: `1`)                                                                   |
 | `WEBHOOK_ENABLED`                 | Set to `true` to enable event webhooks (default: `false`)                                                             |

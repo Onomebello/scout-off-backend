@@ -47,6 +47,10 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `DB_DRIVER` | — | Database driver: `sqlite` (default) or `postgres` |
 | `DB_PATH` | — | SQLite file path (default: `scout-off.db`); only used when `DB_DRIVER=sqlite` |
 | `DATABASE_URL` | — (required when `DB_DRIVER=postgres`) | PostgreSQL connection string, e.g. `postgresql://user:pass@host:5432/db` |
+| `SQLITE_BUSY_TIMEOUT_MS` | — | SQLite lock-contention wait in milliseconds (default: `5000`; SQLite only) |
+| `DB_STATEMENT_TIMEOUT_MS` | — | PostgreSQL server-side statement limit in milliseconds (default: `25000`) |
+| `DB_QUERY_TIMEOUT_MS` | — | PostgreSQL client query limit in milliseconds (default: `30000`) |
+| `DB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS` | — | PostgreSQL idle transaction limit in milliseconds (default: `60000`) |
 | `SSE_KEEPALIVE_INTERVAL_MS` | — | Keep-alive ping interval for SSE connections, in ms (default: `15000`) |
 | `SSE_MAX_CONNECTIONS` | — | Max concurrent SSE connections; `0` = unlimited (default: `0`) |
 | `SSE_RETRY_MS` | — | Base reconnect delay for SSE clients in retry: frame, in ms (default: `5000`) |
@@ -66,7 +70,8 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `RATE_LIMIT_WINDOW_MS` | — | Rate limit window in milliseconds (default: `60000`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
 | `RATE_LIMIT_MAX` | — | Max requests per window per IP (default: `60`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
 | `AUTH_RATE_LIMIT_WINDOW_MS` | — | Auth rate limit window (default: `60000`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
-| `AUTH_RATE_LIMIT_MAX` | — | Max auth requests per window (default: `5`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
+| `AUTH_RATE_LIMIT_MAX` | — | Max auth requests per account and endpoint per window (default: `5`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
+| `AUTH_RATE_LIMIT_IP_MAX` | — | Max requests per auth endpoint per IP and window (default: `60`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
 | `MILESTONE_RATE_WINDOW_MS` | — | Rate limit window for milestone evidence submissions, in ms (default: `60000` = 1 min). See [docs/rate-limiting.md](docs/rate-limiting.md#4-milestone-evidence-submission-rate-limiter). |
 | `MILESTONE_RATE_MAX` | — | Max milestone evidence submissions per window per caller (default: `10`). See [docs/rate-limiting.md](docs/rate-limiting.md#4-milestone-evidence-submission-rate-limiter). |
 | `READINESS_MAX_LAG` | — | Maximum indexer ledger lag (in ledgers) allowed for readiness check. If the indexer is more than this many ledgers behind the chain tip, the readiness check will report the indexer as unavailable. Default: `100`. Set to `0` to disable the lag check. See [docs/readiness-check.md](docs/readiness-check.md). |
