@@ -211,6 +211,9 @@ impl RegisterContract {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
         }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
         if metadata_uri.len() == 0
             || metadata_uri.len() > MAX_METADATA_URI_BYTES
             || position.len() == 0
@@ -283,6 +286,9 @@ impl RegisterContract {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
         }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
         if metadata_uri.len() == 0 || metadata_uri.len() > MAX_METADATA_URI_BYTES {
             return Err(Error::InvalidInput);
         }
@@ -297,11 +303,15 @@ impl RegisterContract {
         };
 
         player.wallet.require_auth();
-        player.metadata_uri = metadata_uri;
+        player.metadata_uri = metadata_uri.clone();
 
         env.storage()
             .instance()
             .set(&DataKey::Player(player_id), &player);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "profile_updated"), player_id),
+            (metadata_uri,),
+        );
         bump_instance(&env);
         Ok(())
     }
@@ -403,6 +413,9 @@ impl RegisterContract {
     pub fn update_progress_level(env: Env, player_id: u64, level: u32) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
+        }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
         }
 
         // The caller must be in the allowlist AND must provide their auth.
@@ -644,6 +657,41 @@ mod tests {
             ),
             Err(Ok(Error::InvalidInput))
         );
+    }
+
+    #[test]
+    fn pause_blocks_registration_profile_and_progress_updates() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &100);
+        let wallet = Address::generate(&env);
+        let pid = client.register_player(
+            &wallet,
+            &String::from_str(&env, "ipfs://old"),
+            &String::from_str(&env, "forward"),
+            &String::from_str(&env, "europe"),
+        );
+
+        client.pause(&admin);
+        assert!(matches!(
+            client.try_register_player(
+                &Address::generate(&env),
+                &String::from_str(&env, "ipfs://new"),
+                &String::from_str(&env, "forward"),
+                &String::from_str(&env, "europe"),
+            ),
+            Err(Ok(Error::ContractPaused))
+        ));
+        assert!(matches!(
+            client.try_update_profile(&pid, &String::from_str(&env, "ipfs://new")),
+            Err(Ok(Error::ContractPaused))
+        ));
+        let updater = Address::generate(&env);
+        client.add_authorized_updater(&updater);
+        assert!(matches!(
+            client.try_update_progress_level(&pid, &1),
+            Err(Ok(Error::ContractPaused))
+        ));
     }
 
     #[test]

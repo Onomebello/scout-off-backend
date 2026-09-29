@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import {
-  queryEvents,
+  getEventsCount,
   getNewPlayersTimeSeries,
   getMilestonesApprovedTimeSeries,
   getContactUnlocksTimeSeries,
@@ -35,10 +35,10 @@ export async function getStats(req: Request, res: Response, next: NextFunction):
     res.json({
       success: true,
       data: {
-        players: queryEvents('player_registered').length,
-        milestones: queryEvents('milestone_approved').length,
-        subscriptions: queryEvents('scout_subscribed').length,
-        events: queryEvents().length,
+        players: getEventsCount('player_registered'),
+        milestones: getEventsCount('milestone_approved'),
+        subscriptions: getEventsCount('scout_subscribed'),
+        events: getEventsCount(),
       },
     });
     return;

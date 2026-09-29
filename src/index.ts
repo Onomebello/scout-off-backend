@@ -68,15 +68,6 @@ async function start() {
 }
 
 async function startServer() {
-  // Validate Pinata credentials at startup
-  try {
-    await checkHealth();
-    logger.info("Pinata credential validation successful");
-  } catch (err) {
-    logger.error("Pinata credential validation failed at startup:", err);
-    process.exit(1);
-  }
-
   const server = app.listen(config.port, () => {
     logger.info(
       `ScoutOff backend running on port ${config.port} [${config.network}]`,
@@ -84,7 +75,16 @@ async function startServer() {
 
     // Log startup health of critical dependencies
     (async () => {
-      const statuses: Record<string, string> = { ipfs: "ok" };
+      const statuses: Record<string, string> = {};
+
+      try {
+        await checkHealth();
+        statuses.ipfs = "ok";
+        logger.info("Pinata credential validation successful");
+      } catch (err) {
+        statuses.ipfs = "unavailable";
+        logger.error("Pinata credential validation failed at startup:", err);
+      }
 
       if (config.stellarHealthCheckEnabled) {
         try {

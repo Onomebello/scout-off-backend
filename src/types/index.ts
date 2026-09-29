@@ -218,6 +218,7 @@ export interface FeeHistoryItem {
  */
 export const CONTRACT_EVENT_TYPES = [
   'player_registered',
+  'profile_updated',
   'milestone_submitted',
   'milestone_approved',
   'milestone_rejected',

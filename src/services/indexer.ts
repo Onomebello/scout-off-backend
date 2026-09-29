@@ -11,6 +11,7 @@ import {
   updatePlayerProgress,
   insertPendingMilestone,
   queryEvents,
+  getEventsCount,
   rollbackEventsFromLedger,
 } from '../db';
 import { dispatchEventWebhook } from './webhooks';
@@ -141,7 +142,6 @@ export async function indexEvents(): Promise<void> {
   if (!response.events.length) return;
 
   const webhookEvents: Array<{ type: string; payload: unknown; txHash: string }> = [];
-  let approvedMilestoneCounts: Map<string, number> | undefined;
 
   // NOTE: this used to be (and, on main, still is) a single synchronous
   // db.transaction() wrapping the whole batch, including reorg detection.
@@ -297,24 +297,9 @@ export async function indexEvents(): Promise<void> {
         } else if (type === 'milestone_approved') {
           const playerId = payload.player_id as string;
           if (playerId) {
-            if (!approvedMilestoneCounts) {
-              approvedMilestoneCounts = new Map();
-              for (const approvedEvent of queryEvents('milestone_approved')) {
-                const approvedPlayerId = approvedEvent.payload.player_id as string | undefined;
-                if (approvedPlayerId) {
-                  approvedMilestoneCounts.set(
-                    approvedPlayerId,
-                    (approvedMilestoneCounts.get(approvedPlayerId) ?? 0) + 1,
-                  );
-                }
-              }
-            } else if (eventInserted) {
-              approvedMilestoneCounts.set(
-                playerId,
-                (approvedMilestoneCounts.get(playerId) ?? 0) + 1,
-              );
-            }
-            const approvedMilestoneCount = approvedMilestoneCounts.get(playerId) ?? 0;
+            const approvedMilestoneCount = getEventsCount('milestone_approved', {
+              payloadFilter: { player_id: playerId },
+            });
             await updatePlayerProgress(
               playerId,
               tierForApprovedMilestones(approvedMilestoneCount),

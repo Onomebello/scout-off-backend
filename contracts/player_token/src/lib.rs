@@ -20,7 +20,7 @@ use soroban_sdk::{
 };
 use scout_off_shared::{
     errors::Error,
-    storage::{bump_instance, is_initialized, set_initialized},
+    storage::{bump_instance, is_initialized, is_paused, set_initialized, set_paused},
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -112,6 +112,44 @@ impl PlayerTokenContract {
         Ok(())
     }
 
+    /// Pause token issuance, purchases, and fee distribution. Only the admin may call this.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        set_paused(&env, true);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Resume token issuance, purchases, and fee distribution. Only the admin may call this.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        set_paused(&env, false);
+        bump_instance(&env);
+        Ok(())
+    }
+
     // ── Token issuance ─────────────────────────────────────────────────────
 
     /// Issue a fixed supply of Player Tokens for `player_id`.
@@ -130,6 +168,9 @@ impl PlayerTokenContract {
     pub fn issue_tokens(env: Env, player_id: u64, total_supply: u64) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
+        }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
         }
         let admin: Address = env
             .storage()
@@ -184,6 +225,9 @@ impl PlayerTokenContract {
     pub fn buy_token(env: Env, player_id: u64, amount: u64, buyer: Address) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
+        }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
         }
         buyer.require_auth();
 
@@ -310,6 +354,9 @@ impl PlayerTokenContract {
     ) -> Result<u32, Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
+        }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
         }
 
         let admin: Address = env
@@ -465,6 +512,12 @@ impl PlayerTokenContract {
     ///
     /// Returns the number of holders migrated in this step.
     pub fn migrate_player_step(env: Env, player_id: u64, start: u32, count: u32) -> Result<u32, Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
         // Only admin may perform migration.
         let admin: Address = env
             .storage()
@@ -636,6 +689,28 @@ mod tests {
         client.issue_tokens(&1u64, &1000u64);
         // Second issue for same player must fail.
         assert!(client.try_issue_tokens(&1u64, &500u64).is_err());
+    }
+
+    #[test]
+    fn pause_blocks_token_issuance_and_purchases_until_unpaused() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let buyer = Address::generate(&env);
+        client.issue_tokens(&1u64, &100u64);
+
+        client.pause(&admin);
+        assert!(matches!(
+            client.try_issue_tokens(&2u64, &100u64),
+            Err(Ok(Error::ContractPaused))
+        ));
+        assert!(matches!(
+            client.try_buy_token(&1u64, &10u64, &buyer),
+            Err(Ok(Error::ContractPaused))
+        ));
+
+        client.unpause(&admin);
+        client.buy_token(&1u64, &10u64, &buyer);
+        assert_eq!(client.get_balance(&1u64, &buyer), 10);
     }
 
     #[test]
