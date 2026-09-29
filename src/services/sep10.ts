@@ -243,8 +243,9 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
 
   // Issue JWT with client account, role, and a unique JTI for revocation support
   const jti = crypto.randomUUID();
-  const token = jwt.sign({ sub: clientAccountId, role: role ?? 'player', jti }, config.jwtSecret, {
+  const token = jwt.sign({ sub: clientAccountId, role: role ?? 'player' }, config.jwtSecret, {
     expiresIn: TOKEN_TTL_SECONDS,
+    jwtid: jti,
   });
 
   span.setAttribute('sep10.account', clientAccountId);

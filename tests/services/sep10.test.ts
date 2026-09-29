@@ -1,5 +1,6 @@
 import { buildChallenge, verifyAndIssueToken } from '../../src/services/sep10';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import { Keypair, Transaction, Networks, TransactionBuilder, BASE_FEE, Operation, Account, Asset } from '@stellar/stellar-sdk';
 
 const clientKeypair = Keypair.random();
@@ -20,6 +21,27 @@ describe('sep10', () => {
     const { token, account } = verifyAndIssueToken(signedXdr);
     expect(typeof token).toBe('string');
     expect(account).toBe(clientKeypair.publicKey());
+  });
+
+  it('verifyAndIssueToken issues a JWT carrying a unique jti claim for revocation', () => {
+    const signChallenge = (): string => {
+      const xdr = buildChallenge(clientKeypair.publicKey());
+      const tx = new Transaction(xdr, Networks.TESTNET);
+      tx.sign(clientKeypair);
+      return tx.toXdr();
+    };
+
+    const first = verifyAndIssueToken(signChallenge());
+    const second = verifyAndIssueToken(signChallenge());
+    const firstPayload = jwt.decode(first.token) as jwt.JwtPayload | null;
+    const secondPayload = jwt.decode(second.token) as jwt.JwtPayload | null;
+
+    // jwt.sign's `jwtid` option must surface as the standard `jti` claim so the
+    // existing revocation infrastructure (middleware + admin endpoint) applies.
+    expect(firstPayload?.jti).toEqual(expect.any(String));
+    expect(firstPayload?.jti).not.toHaveLength(0);
+    expect(secondPayload?.jti).toEqual(expect.any(String));
+    expect(secondPayload?.jti).not.toBe(firstPayload?.jti);
   });
 
   it('verifyAndIssueToken throws on unsigned challenge', () => {
