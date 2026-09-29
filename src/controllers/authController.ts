@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Keypair } from '@stellar/stellar-sdk';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
-import { buildChallenge, verifyAndIssueToken, extractAccount } from '../services/sep10';
+import { buildChallenge, verifyChallenge, extractAccount } from '../services/sep10';
 import { logger } from '../utils/logger';
 import { extractClientIp } from '../utils/ipExtractor';
 import config from '../config';
@@ -99,7 +99,7 @@ try {
     const { transaction, role } = parsed.data;
 
     // Step 1: verify signatures and get the authenticated account.
-    const { account } = verifyAndIssueToken(transaction, role);
+    const { account } = verifyChallenge(transaction);
 
     // Step 2: determine the effective role from the cryptographically verified account.
     const isAdmin =

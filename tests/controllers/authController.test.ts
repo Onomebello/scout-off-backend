@@ -11,7 +11,7 @@ describe('postToken authentication errors', () => {
     ['Invalid challenge signature', 'TOKEN_INVALID'],
     ['Challenge has expired', 'TOKEN_EXPIRED'],
   ])('returns a machine-readable code for %s', (message, code) => {
-    jest.spyOn(sep10, 'verifyAndIssueToken').mockImplementation(() => {
+    jest.spyOn(sep10, 'verifyChallenge').mockImplementation(() => {
       throw new Error(message);
     });
 
