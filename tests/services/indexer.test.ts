@@ -2,9 +2,12 @@ import {
   insertOrUpdatePlayer,
   updatePlayerProgress,
   getPlayerById,
+  getPlayerByOnChainId,
+  getPlayersMissingOnChainId,
+  setPlayerOnChainId,
   queryPlayers,
 } from '../../src/db';
-import { normalizeEventId, normalizePayload } from '../../src/services/indexer';
+import { normalizeEventId, normalizePayload, normalizeSorobanEvent } from '../../src/services/indexer';
 import {
   countEvents,
   dbAll,
@@ -38,6 +41,88 @@ describe('indexer', () => {
 
     it('returns empty object for empty input', () => {
       expect(normalizePayload({})).toEqual({});
+    });
+  });
+
+  describe('normalizeSorobanEvent', () => {
+    it('decodes player_rg topics and positional registration data', () => {
+      const { Address, Keypair, nativeToScVal } = require('@stellar/stellar-sdk');
+      const wallet = Keypair.random().publicKey();
+      const event = normalizeSorobanEvent({
+        topic: [
+          nativeToScVal('player_rg', { type: 'symbol' }),
+          Address.fromString(wallet).toScVal(),
+        ],
+        value: nativeToScVal([7n, 'ipfs://meta', 'forward', 'europe']),
+      });
+
+      expect(event).toEqual({
+        type: 'player_registered',
+        payload: {
+          player_id: '7',
+          on_chain_player_id: '7',
+          wallet,
+          metadata_uri: 'ipfs://meta',
+          position: 'forward',
+          region: 'europe',
+        },
+      });
+    });
+
+    it('extracts the indexed player ID from token events', () => {
+      const { nativeToScVal } = require('@stellar/stellar-sdk');
+      const event = normalizeSorobanEvent({
+        topic: [
+          nativeToScVal('tok_buy', { type: 'symbol' }),
+          nativeToScVal(7n, { type: 'u64' }),
+        ],
+        value: nativeToScVal([7n, 10]),
+      });
+
+      expect(event.type).toBe('token_bought');
+      expect(event.payload.player_id).toBe('7');
+      expect(event.payload.on_chain_player_id).toBe('7');
+    });
+
+    it('decodes subscription contact unlocks from the value tuple', () => {
+      const { Address, Keypair, nativeToScVal } = require('@stellar/stellar-sdk');
+      const scout = Keypair.random().publicKey();
+      const event = normalizeSorobanEvent({
+        topic: [nativeToScVal('contact_unlocked', { type: 'symbol' })],
+        value: nativeToScVal([Address.fromString(scout), 12n]),
+      });
+
+      expect(event).toEqual({
+        type: 'contact_unlocked',
+        payload: {
+          scout,
+          player_id: '12',
+          on_chain_player_id: '12',
+        },
+      });
+    });
+
+    it('keeps connection creation out of the paid contact-unlock event stream', () => {
+      const { Address, Keypair, nativeToScVal } = require('@stellar/stellar-sdk');
+      const scout = Keypair.random().publicKey();
+      const event = normalizeSorobanEvent({
+        topic: [
+          nativeToScVal('contact_unlocked', { type: 'symbol' }),
+          Address.fromString(scout).toScVal(),
+          nativeToScVal(12n, { type: 'u64' }),
+        ],
+        value: nativeToScVal(['direct']),
+      });
+
+      expect(event).toEqual({
+        type: 'connection_created',
+        payload: {
+          scout,
+          player_id: '12',
+          connection_type: 'direct',
+          on_chain_player_id: '12',
+        },
+      });
     });
   });
 
@@ -89,6 +174,20 @@ describe('player table helpers', () => {
 
   it('getPlayerById returns null for unknown player', async () => {
     expect(await getPlayerById('nonexistent-player-xyz')).toBeNull();
+  });
+
+  it('stores and looks up a confirmed on-chain ID without replacing the API ID', async () => {
+    const apiPlayerId = `mapping-test-${Math.random().toString(36).slice(2)}`;
+    const onChainPlayerId = `88${Math.floor(Math.random() * 1_000_000)}`;
+    await insertOrUpdatePlayer({ player_id: apiPlayerId, wallet: WALLET });
+
+    expect(
+      (await getPlayersMissingOnChainId('', 100)).some((row) => row.player_id === apiPlayerId),
+    ).toBe(true);
+    await setPlayerOnChainId(apiPlayerId, onChainPlayerId);
+
+    expect((await getPlayerById(apiPlayerId))?.on_chain_player_id).toBe(onChainPlayerId);
+    expect((await getPlayerByOnChainId(onChainPlayerId))?.player_id).toBe(apiPlayerId);
   });
 
   it('queryPlayers returns players matching region filter', async () => {

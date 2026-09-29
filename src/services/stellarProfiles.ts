@@ -7,6 +7,7 @@ import {
   isPlayerNotFoundError,
   sendTransactionWithCorrelation,
   server,
+  requireOnChainPlayerId,
 } from './stellarCore';
 
 const tracer = trace.getTracer('scout-off-backend');
@@ -40,6 +41,7 @@ export async function updateProfile(
       if (!playerId || !metadataUri) {
         throw new PaymentError('playerId and metadataUri are required', 'INVALID_ACCOUNT');
       }
+      const onChainPlayerId = await requireOnChainPlayerId(playerId);
 
       const { getPlatformKeypair } = await import('../utils/signer');
       const keypair = getPlatformKeypair();
@@ -57,7 +59,7 @@ export async function updateProfile(
         .addOperation(
           contract.call(
             'update_profile',
-            nativeToScVal(playerId, { type: 'string' }),
+            nativeToScVal(onChainPlayerId, { type: 'u64' }),
             nativeToScVal(metadataUri, { type: 'string' }),
           ),
         )

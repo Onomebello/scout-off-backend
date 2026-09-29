@@ -10,6 +10,7 @@ import {
   sendTransactionWithCorrelation,
   server,
   waitForTransactionConfirmation,
+  requireOnChainPlayerId,
 } from './stellarCore';
 
 const tracer = trace.getTracer('scout-off-backend');
@@ -25,6 +26,7 @@ export async function submitContactPayment(
       if (!scoutWallet || !playerId) {
         throw new PaymentError('Missing scoutWallet or playerId', 'INVALID_ACCOUNT');
       }
+      const onChainPlayerId = await requireOnChainPlayerId(playerId);
 
       const { getPlatformKeypair } = await import('../utils/signer');
       const keypair = getPlatformKeypair();
@@ -43,7 +45,7 @@ export async function submitContactPayment(
           contract.call(
             'pay_to_contact',
             Address.fromString(scoutWallet).toScVal(),
-            nativeToScVal(playerId, { type: 'string' }),
+            nativeToScVal(onChainPlayerId, { type: 'u64' }),
           ),
         )
         .setTimeout(30)
@@ -140,6 +142,7 @@ export async function logTrialOffer(
       if (!scoutWallet || !playerId || !detailsUri) {
         throw new PaymentError('Missing scoutWallet, playerId, or detailsUri', 'INVALID_ACCOUNT');
       }
+      const onChainPlayerId = await requireOnChainPlayerId(playerId);
 
       const { getPlatformKeypair } = await import('../utils/signer');
       const keypair = getPlatformKeypair();
@@ -158,7 +161,7 @@ export async function logTrialOffer(
           contract.call(
             'log_trial_offer',
             Address.fromString(scoutWallet).toScVal(),
-            nativeToScVal(playerId, { type: 'string' }),
+            nativeToScVal(onChainPlayerId, { type: 'u64' }),
             nativeToScVal(detailsUri, { type: 'string' }),
           ),
         )

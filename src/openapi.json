@@ -136,7 +136,20 @@
         ],
         "properties": {
           "player_id": {
-            "type": "string"
+            "type": "string",
+            "description": "API player identifier (cuid2)"
+          },
+          "on_chain_player_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "Sequential u64 ID assigned by the register contract; null while registration is pending"
+          },
+          "registration_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "registered"
+            ]
           },
           "wallet": {
             "type": "string"
@@ -2690,7 +2703,7 @@
         },
         "responses": {
           "201": {
-            "description": "{ success: true, data: { playerId, metadataUri, gatewayUrl } }"
+            "description": "{ success: true, data: { playerId, onChainPlayerId, registrationStatus, onChainRegistration, metadataUri, gatewayUrl } }"
           },
           "400": {
             "description": "{ success: false, error: string } - Invalid body"
@@ -3270,7 +3283,7 @@
         ],
         "summary": "Purchase Player Tokens for the given player (stub — no real XLM transfer).",
         "operationId": "buyPlayerToken",
-        "description": "Purchase Player Tokens for the given player (stub — no real XLM transfer).\nGated by the `player_tokens` feature flag — returns 404 when disabled.",
+        "description": "Purchase Player Tokens for the given player (stub — no real XLM transfer).\nGated by the `player_tokens` feature flag — returns 404 when disabled.\nThe authenticated account is the buyer; the optional buyerWallet field is\naccepted for compatibility only when it matches that account.",
         "parameters": [
           {
             "name": "playerId",
@@ -3284,7 +3297,7 @@
         ],
         "requestBody": {
           "required": true,
-          "description": "{ amount: number, buyerWallet: string }",
+          "description": "{ amount: number, buyerWallet?: string }",
           "content": {
             "application/json": {
               "schema": {
@@ -3300,8 +3313,7 @@
                   }
                 },
                 "required": [
-                  "amount",
-                  "buyerWallet"
+                  "amount"
                 ],
                 "additionalProperties": false
               }
@@ -3314,6 +3326,12 @@
           },
           "400": {
             "description": "{ success: false, error: string } - Invalid amount"
+          },
+          "401": {
+            "description": "{ success: false, error: string } - Authentication required"
+          },
+          "403": {
+            "description": "{ success: false, error: string } - buyerWallet does not match authenticated account"
           },
           "404": {
             "description": "{ success: false, error: string } - Feature flag disabled or player not found"

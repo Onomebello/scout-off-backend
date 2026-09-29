@@ -45,6 +45,7 @@ import { isValidIpfsOrHttpsUri } from '../utils/uriValidator';
  * | EXPIRED_TRUSTLINE   | 402  | Payment-token trustline missing/expired  |
  * | CONTRACT_PAUSED     | 503  | Contract error #10 — platform paused     |
  * | MISSING_PLAYER      | 404  | Contract error #3 — player not on-chain  |
+ * | PENDING_REGISTRATION| 409  | Wallet registration is not confirmed    |
  * | INVALID_ACCOUNT     | 400  | Missing/malformed wallet or playerId     |
  * | CONTRACT_ERROR      | 502  | Contract rejected the transaction        |
  * | NETWORK_ERROR       | 502  | RPC failure / confirmation timeout       |
@@ -59,6 +60,8 @@ export function paymentErrorStatus(code: PaymentError['code']): number {
       return 503;
     case 'MISSING_PLAYER':
       return 404;
+    case 'PENDING_REGISTRATION':
+      return 409;
     case 'INVALID_ACCOUNT':
       return 400;
     case 'CONTRACT_ERROR':
@@ -330,7 +333,7 @@ try {
     }
   } catch (err) {
     if (err instanceof PaymentError) {
-      res.status(402).json({ success: false, error: err.message, code: err.code });
+      res.status(paymentErrorStatus(err.code)).json({ success: false, error: err.message, code: err.code });
       return;
     }
     next(err);
@@ -619,7 +622,7 @@ try {
     });
   } catch (err) {
     if (err instanceof PaymentError) {
-      res.status(402).json({ success: false, error: err.message, code: err.code });
+      res.status(paymentErrorStatus(err.code)).json({ success: false, error: err.message, code: err.code });
       return;
     }
     next(err);
