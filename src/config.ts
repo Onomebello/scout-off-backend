@@ -72,6 +72,64 @@ if (!VALID_ENVS.has(rawNodeEnv)) {
 }
 const nodeEnv = rawNodeEnv as NodeEnv;
 
+function isLikelyPlaceholderSecret(secret: string): boolean {
+  const normalized = secret.trim().toLowerCase();
+  if (!normalized) return true;
+
+  const obviousPlaceholders = [
+    'changeme',
+    'change-me',
+    'change_me',
+    'example',
+    'example-secret',
+    'example_secret',
+    'jwt-secret',
+    'jwt_secret',
+    'replace-me',
+    'replace_me',
+    'secret',
+    'mysecret',
+    'test-secret',
+    'development-secret',
+  ];
+
+  return obviousPlaceholders.some((placeholder) => normalized === placeholder || normalized.includes(placeholder));
+}
+
+function validateSecretStrength(name: string, value: string): void {
+  const trimmed = value.trim();
+  const byteLength = new TextEncoder().encode(trimmed).length;
+
+  if (isLikelyPlaceholderSecret(trimmed)) {
+    if (nodeEnv === 'production' || nodeEnv === 'staging') {
+      throw new Error(
+        `${name} looks like a placeholder or default secret; set a unique value with at least 32 bytes.`,
+      );
+    }
+    if (nodeEnv === 'development') {
+      console.warn(
+        `[config] WARNING: ${name} looks like a placeholder or default secret; set a unique value with at least 32 bytes.`,
+      );
+    }
+    return;
+  }
+
+  if (nodeEnv === 'production' || nodeEnv === 'staging') {
+    if (byteLength < 32) {
+      throw new Error(
+        `${name} must be at least 32 bytes long in ${nodeEnv} (for example, 64 hex chars or 43+ base64 chars).`,
+      );
+    }
+    return;
+  }
+
+  if (nodeEnv === 'development' && byteLength < 32) {
+    console.warn(
+      `[config] WARNING: ${name} is shorter than 32 bytes in development; this is allowed for local testing but not recommended for production.`,
+    );
+  }
+}
+
 // Validate ADMIN_WALLET based on environment:
 // - production: throw immediately so the process never starts without it
 // - staging: emit a console warning (process continues)
@@ -229,7 +287,11 @@ const config = {
 
   /** Address of the deployed `connection` Soroban contract. */
   connectionContractId: process.env.CONNECTION_CONTRACT_ID ?? process.env.CONTRACT_ID ?? '',
-  jwtSecret: required('JWT_SECRET'),
+  jwtSecret: (() => {
+    const value = required('JWT_SECRET');
+    validateSecretStrength('JWT_SECRET', value);
+    return value;
+  })(),
   /**
    * SEP-10 server signing keypair secret (Stellar strkey starting with 'S').
    * Must be identical on every backend instance.  See docs/auth.md for
@@ -258,7 +320,11 @@ const config = {
       ],
   },
   platformFeeBps: parseNumericEnv('PLATFORM_FEE_BPS', process.env.PLATFORM_FEE_BPS, 500, { min: 0, max: 10000, integer: true }),
-  jwtSecretPrevious: process.env.JWT_SECRET_PREVIOUS ?? '',
+  jwtSecretPrevious: (() => {
+    const value = process.env.JWT_SECRET_PREVIOUS ?? '';
+    if (value) validateSecretStrength('JWT_SECRET_PREVIOUS', value);
+    return value;
+  })(),
   /**
    * Absolute end of the previous-secret grace window (epoch milliseconds).
    * Parsed from `JWT_SECRET_PREVIOUS_UNTIL` (Unix seconds or ISO-8601).
