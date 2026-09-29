@@ -39,6 +39,7 @@ import { recordAudit } from "../utils/audit";
 import { canAccessPlayer } from "../utils/playerAccess";
 import { MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE } from "../utils/pagination";
 import { logger } from "../utils/logger";
+import config from "../config";
 
 const baseRegistrationSchema = z.object({
   wallet: z.string().min(56).max(56),
@@ -112,6 +113,7 @@ export async function registerPlayer(
   const now = Date.now();
   await insertOrUpdatePlayer({
     player_id: playerId,
+    on_chain_player_id: null,
     wallet: parsed.wallet,
     position: canonicalPosition,
     region: sanitizedRegion,
@@ -126,6 +128,8 @@ export async function registerPlayer(
 
   void dispatchEventWebhook("player_registered", {
     player_id: playerId,
+    on_chain_player_id: null,
+    registration_status: 'pending',
     wallet: parsed.wallet,
     position: canonicalPosition,
     region: sanitizedRegion,
@@ -144,10 +148,38 @@ export async function registerPlayer(
     region: sanitizedRegion,
   });
   const body: ApiResponse<
-    typeof ipfsResult & { playerId: string; metadataUri: string; gatewayUrl: string }
+    typeof ipfsResult & {
+      playerId: string;
+      metadataUri: string;
+      gatewayUrl: string;
+      onChainPlayerId: null;
+      registrationStatus: 'pending';
+      onChainRegistration: {
+        contractId: string;
+        method: 'register_player';
+        args: { wallet: string; metadataUri: string; position: string; region: string };
+      };
+    }
   > = {
     success: true,
-    data: { ...ipfsResult, playerId, metadataUri, gatewayUrl: ipfsResult.uri },
+    data: {
+      ...ipfsResult,
+      playerId,
+      metadataUri,
+      gatewayUrl: ipfsResult.uri,
+      onChainPlayerId: null,
+      registrationStatus: 'pending',
+      onChainRegistration: {
+        contractId: config.registerContractId,
+        method: 'register_player',
+        args: {
+          wallet: parsed.wallet,
+          metadataUri,
+          position: canonicalPosition,
+          region: sanitizedRegion,
+        },
+      },
+    },
   };
   res.status(201).json(body);
  } catch (err) {
@@ -165,6 +197,8 @@ function buildPlayerDetail(row: PlayerRow): Record<string, unknown> {
   const { tierName: tierNameMeta, tierDescription } = getTierMeta(row.progress_level as number);
   return {
     player_id: row.player_id,
+    on_chain_player_id: row.on_chain_player_id,
+    registration_status: row.on_chain_player_id ? 'registered' : 'pending',
     wallet: row.wallet,
     position: row.position,
     region: row.region,

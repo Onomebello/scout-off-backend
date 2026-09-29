@@ -15,6 +15,7 @@ import config from '../config';
 import { correlationMemoFromContext, recordTxCorrelation } from './txCorrelation';
 
 import { stellarBreaker } from '../utils/circuitBreaker';
+import { getPlayerById } from '../db';
 
 const tracer = trace.getTracer('scout-off-backend');
 
@@ -94,6 +95,7 @@ export type PaymentErrorCode =
   | 'INVALID_ACCOUNT'
   | 'NETWORK_ERROR'
   | 'MISSING_PLAYER'
+  | 'PENDING_REGISTRATION'
   | 'EXPIRED_TRUSTLINE'
   | 'CONTRACT_PAUSED'
   | 'CONTRACT_ERROR'
@@ -107,6 +109,26 @@ export class PaymentError extends Error {
     super(message);
     this.name = 'PaymentError';
   }
+}
+
+export async function resolveOnChainPlayerId(playerId: string): Promise<bigint | null> {
+  const player = await getPlayerById(playerId);
+  if (!player) {
+    throw new PaymentError('Player not found', 'MISSING_PLAYER');
+  }
+  if (!player.on_chain_player_id) return null;
+  if (!/^\d+$/.test(player.on_chain_player_id)) {
+    throw new PaymentError('Invalid on-chain player ID mapping', 'CONTRACT_ERROR');
+  }
+  return BigInt(player.on_chain_player_id);
+}
+
+export async function requireOnChainPlayerId(playerId: string): Promise<bigint> {
+  const onChainPlayerId = await resolveOnChainPlayerId(playerId);
+  if (onChainPlayerId === null) {
+    throw new PaymentError('Player registration is pending on-chain', 'PENDING_REGISTRATION');
+  }
+  return onChainPlayerId;
 }
 
 /** Matches the contract's ContractPaused (#10) error in a simulation/result error string. */
@@ -280,3 +302,30 @@ export async function isSubscribed(
  *   'NETWORK_ERROR'      — RPC/transport failure, on-chain rejection with an
  *                          unrecognised error, or confirmation timeout
  */
+
+/** Read the register contract's wallet mapping for one-time database backfills. */
+export async function queryOnChainPlayerId(wallet: string): Promise<string | null> {
+  if (!wallet) throw new PaymentError('Missing wallet', 'INVALID_ACCOUNT');
+
+  const ephemeral = Keypair.random();
+  const sourceAccount = new Account(ephemeral.publicKey(), '0');
+  const contract = new Contract(config.registerContractId);
+  const tx = createTxBuilder(sourceAccount)
+    .addOperation(
+      contract.call('get_player_id', Address.fromString(wallet).toScVal()),
+    )
+    .setTimeout(30)
+    .build();
+  const simResult = await server.simulateTransaction(tx);
+  if (rpc.Api.isSimulationError(simResult)) {
+    throw new PaymentError(
+      `Contract simulation failed: ${simResult.error ?? ''}`,
+      'NETWORK_ERROR',
+    );
+  }
+
+  const retval = (simResult as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+  if (!retval) return null;
+  const playerId = scValToNative(retval);
+  return playerId === null || playerId === undefined ? null : String(playerId);
+}

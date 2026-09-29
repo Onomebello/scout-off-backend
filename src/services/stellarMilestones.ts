@@ -5,6 +5,7 @@ import {
   PaymentError,
   createTxBuilder,
   isPlayerNotFoundError,
+  resolveOnChainPlayerId,
   server,
 } from './stellarCore';
 
@@ -83,6 +84,8 @@ export async function queryMilestonesPage(
       if (effectiveLimit <= 0) {
         throw new PaymentError('Invalid limit', 'INVALID_ACCOUNT');
       }
+      const onChainPlayerId = await resolveOnChainPlayerId(playerId);
+      if (onChainPlayerId === null) return { items: [], next: null };
 
       try {
         const contract = new Contract(config.progressContractId);
@@ -95,7 +98,7 @@ export async function queryMilestonesPage(
           .addOperation(
             contract.call(
               'get_milestones_page',
-              nativeToScVal(playerId, { type: 'string' }),
+              nativeToScVal(onChainPlayerId, { type: 'u64' }),
               nativeToScVal(start ?? 0, { type: 'u32' }),
               nativeToScVal(effectiveLimit, { type: 'u32' }),
             ),
@@ -175,6 +178,8 @@ export async function queryMilestones(
       if (effectiveLimit <= 0) {
         throw new PaymentError('Invalid limit', 'INVALID_ACCOUNT');
       }
+      const onChainPlayerId = await resolveOnChainPlayerId(playerId);
+      if (onChainPlayerId === null) return [];
 
       try {
         const contract = new Contract(config.progressContractId);
@@ -187,7 +192,7 @@ export async function queryMilestones(
           .addOperation(
             contract.call(
               'get_milestones_page',
-              nativeToScVal(playerId, { type: 'string' }),
+              nativeToScVal(onChainPlayerId, { type: 'u64' }),
               nativeToScVal(start ?? 0, { type: 'u32' }),
               nativeToScVal(effectiveLimit, { type: 'u32' }),
             ),
