@@ -5,7 +5,7 @@ use soroban_sdk::{
 };
 use scout_off_shared::{
     errors::Error,
-    storage::{bump_instance, is_initialized, set_initialized},
+    storage::{bump_instance, is_initialized, is_paused, set_initialized, set_paused},
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +69,44 @@ impl ProgressContract {
             .instance()
             .set(&DataKey::MilestoneCounter, &0u64);
         set_initialized(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Pause milestone submissions and approvals. Only the admin may call this.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        set_paused(&env, true);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Resume milestone submissions and approvals. Only the admin may call this.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        set_paused(&env, false);
         bump_instance(&env);
         Ok(())
     }
@@ -166,6 +204,9 @@ impl ProgressContract {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
         }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
         validator.require_auth();
 
         // InvalidValidator(4)
@@ -252,6 +293,9 @@ impl ProgressContract {
     ) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
+        }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
         }
         validator.require_auth();
 
@@ -408,6 +452,39 @@ mod tests {
             &String::from_str(&env, "ipfs://evidence"),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn pause_blocks_submissions_and_approvals_until_unpaused() {
+        let env = Env::default();
+        let (prog, reg, admin) = setup(&env);
+        let player_id = register_player(&env, &reg);
+        let validator = Address::generate(&env);
+        prog.register_validator(&validator);
+        let milestone_id = prog.submit_milestone(
+            &validator,
+            &player_id,
+            &String::from_str(&env, "identity"),
+            &String::from_str(&env, "ipfs://evidence"),
+        );
+
+        prog.pause(&admin);
+        assert!(matches!(
+            prog.try_submit_milestone(
+                &validator,
+                &player_id,
+                &String::from_str(&env, "performance"),
+                &String::from_str(&env, "ipfs://evidence-2"),
+            ),
+            Err(Ok(Error::ContractPaused))
+        ));
+        assert!(matches!(
+            prog.try_approve_milestone(&validator, &milestone_id),
+            Err(Ok(Error::ContractPaused))
+        ));
+
+        prog.unpause(&admin);
+        prog.approve_milestone(&validator, &milestone_id);
     }
 
     #[test]
