@@ -136,6 +136,26 @@ describe('POST /api/players/register — role enforcement', () => {
   });
 });
 
+describe('POST /api/players/register — cache invalidation ordering', () => {
+  it('invalidates player-list caches only after the database write', async () => {
+    const { insertOrUpdatePlayer } = require('../../src/db');
+    const { invalidatePlayerCache } = require('../../src/services/cache');
+    insertOrUpdatePlayer.mockClear();
+    invalidatePlayerCache.mockClear();
+
+    const token = makeToken(PLAYER_WALLET, 'player');
+    const res = await request(app)
+      .post('/api/players/register')
+      .set('Authorization', `Bearer ${token}`)
+      .send(validPayload);
+
+    expect(res.status).toBe(201);
+    expect(insertOrUpdatePlayer.mock.invocationCallOrder[0]).toBeLessThan(
+      invalidatePlayerCache.mock.invocationCallOrder[0],
+    );
+  });
+});
+
 // ─── PUT /api/players/:playerId ───────────────────────────────────────────────
 
 describe('PUT /api/players/:playerId — role enforcement', () => {

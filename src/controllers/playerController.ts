@@ -105,9 +105,6 @@ export async function registerPlayer(
           ...parsed.metadata,
         });
 
-  // Invalidate player search cache so new profile appears in results
-  await invalidatePlayerCache();
-
   // Write to DB immediately so GET /players/:playerId returns 200 without
   // waiting for the indexer to process the blockchain event (#282).
   const playerId = createId();
@@ -121,6 +118,10 @@ export async function registerPlayer(
     created_at: now,
     registered_at: now,
   });
+
+  // Invalidate after the write so a concurrent list request cannot repopulate
+  // the cache with a stale result between invalidation and insertion.
+  await invalidatePlayerCache();
 
   await dispatchEventWebhook("player_registered", {
     player_id: playerId,
