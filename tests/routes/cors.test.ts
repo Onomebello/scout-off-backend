@@ -114,6 +114,27 @@ describe('CORS origin allowlist', () => {
     expect(res.headers['access-control-allow-origin']).toBe(ALLOWED);
   });
 
+  it('exposes API, redirect, and rate-limit response headers to browsers', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.CORS_ALLOWED_ORIGINS = ALLOWED;
+
+    const { default: app } = await import('../../src/app');
+    const res = await request(app)
+      .get('/api/version')
+      .set('Origin', ALLOWED);
+    const exposedHeaders = res.headers['access-control-expose-headers']
+      .split(',')
+      .map((header: string) => header.trim().toLowerCase());
+
+    expect(res.headers['api-version']).toBeDefined();
+    expect(exposedHeaders).toEqual(expect.arrayContaining([
+      'api-version',
+      'location',
+      'retry-after',
+      'x-ratelimit-reputation-limit',
+    ]));
+  });
+
   it('omits CORS header on preflight OPTIONS for disallowed origin', async () => {
     process.env.NODE_ENV = 'production';
     process.env.CORS_ALLOWED_ORIGINS = ALLOWED;
