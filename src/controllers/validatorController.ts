@@ -1,7 +1,6 @@
 import path from 'path';
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import axios from 'axios';
 import { logger } from '../utils/logger';
 import { pinJson, pinFile, isPinataConfigured } from '../services/ipfs';
 import { getPendingMilestones as getPendingMilestonesFromDb, getDriver, removePendingMilestone, incrementValidatorApproved, queryEvents, getEventsCount, updatePlayerProgress, getValidatorStats } from '../db';
@@ -15,9 +14,32 @@ import { checkWalletOwnership } from '../middleware/requireOwner';
 export { isValidMetadataUri };
 import { tierForApprovedMilestones } from '../services/tierPromotion';
 import config from '../config';
+import { safeFetch, SafeFetchError, SafeFetchResult, sniffContentType } from '../utils/safeFetch';
+import { recordEvidenceRejection } from '../middleware/metrics';
 
 /** MIME types accepted as evidence. */
 const ALLOWED_CONTENT_TYPE_PREFIXES = ['video/', 'image/', 'application/pdf', 'text/plain'];
+
+const BUDGET_WINDOW_MS = 60 * 60 * 1000;
+const evidenceBudget = new Map<string, { windowStart: number; bytes: number }>();
+
+function budgetEntry(key: string): { windowStart: number; bytes: number } {
+  const now = Date.now();
+  let entry = evidenceBudget.get(key);
+  if (!entry || now - entry.windowStart >= BUDGET_WINDOW_MS) {
+    entry = { windowStart: now, bytes: 0 };
+    evidenceBudget.set(key, entry);
+  }
+  return entry;
+}
+
+function hasEvidenceBudget(key: string): boolean {
+  return budgetEntry(key).bytes < config.evidenceValidatorBytesPerHour;
+}
+
+function consumeEvidenceBudget(key: string, bytes: number): void {
+  budgetEntry(key).bytes += bytes;
+}
 
 function isAllowedContentType(contentType: string): boolean {
   const normalized = contentType.split(';')[0].trim().toLowerCase();
@@ -25,14 +47,19 @@ function isAllowedContentType(contentType: string): boolean {
 }
 
 /**
- * Download an HTTPS URL, validate its Content-Type and size, then pin the
+ * Download an HTTPS URL, validate its content and size, then pin the
  * file buffer to IPFS via Pinata.  Returns the resulting CID.
  *
  * Throws structured errors that the route handler converts to HTTP responses:
  *   - { status: 422, message } — unsupported content type
  *   - { status: 413, message } — file exceeds EVIDENCE_MAX_BYTES
+ *   - { status: 422, message } — URL resolves to a private/metadata address,
+ *     redirects somewhere disallowed, or content bytes don't match the type
+ *   - { status: 429, message } — per-validator hourly byte budget exhausted
+ *
+ * The download goes through the SSRF-safe fetcher in utils/safeFetch.ts.
  */
-export async function downloadAndPinEvidence(url: string): Promise<string> {
+export async function downloadAndPinEvidence(url: string, budgetKey = 'unknown'): Promise<string> {
   // In local development/test, preserve offline evidence submission without
   // pretending an empty file was pinned. Deployments must never persist a
   // synthetic evidence CID.
@@ -45,66 +72,47 @@ export async function downloadAndPinEvidence(url: string): Promise<string> {
     throw new Error('IPFS service unavailable: PINATA_API_KEY and PINATA_SECRET must be set in staging and production');
   }
 
-  // Step 1: HEAD request to check Content-Type and Content-Length before downloading.
-  let contentType: string;
-  let contentLength: number | null = null;
+  // Per-validator byte budget (sliding hour window).
+  if (!hasEvidenceBudget(budgetKey)) {
+    recordEvidenceRejection('budget_exceeded');
+    const err = new Error('Evidence download budget exceeded for this validator; try again later') as Error & { status: number };
+    err.status = 429;
+    throw err;
+  }
 
+  let fetched: SafeFetchResult;
   try {
-    const head = await axios.head(url, { timeout: 10000 });
-    contentType = (head.headers['content-type'] as string | undefined) ?? '';
-    const clHeader = head.headers['content-length'];
-    if (clHeader) {
-      contentLength = parseInt(String(clHeader), 10);
+    fetched = await safeFetch(url, { maxBytes: config.evidenceMaxBytes, timeoutMs: 30000, maxRedirects: 3 });
+  } catch (fetchErr) {
+    if (fetchErr instanceof SafeFetchError) {
+      recordEvidenceRejection(fetchErr.reason);
+      const err = new Error(fetchErr.message) as Error & { status: number };
+      err.status = fetchErr.status;
+      throw err;
     }
-  } catch {
-    // Some servers reject HEAD — fall through to GET with streaming
-    contentType = '';
-    contentLength = null;
+    throw fetchErr;
   }
+  const { buffer, declaredContentType } = fetched;
+  consumeEvidenceBudget(budgetKey, buffer.length);
 
-  // Validate content type from HEAD (if available).
-  if (contentType && !isAllowedContentType(contentType)) {
-    const err = new Error(`Unsupported evidence content type: ${contentType}. Accepted: video/*, image/*, application/pdf, text/plain`) as Error & { status: number };
+  // Trust magic bytes, not the remote Content-Type.
+  const declared = declaredContentType.split(';')[0].trim().toLowerCase();
+  const sniffed = sniffContentType(buffer);
+  if (declared && declared !== 'application/octet-stream' && !isAllowedContentType(declared)) {
+    recordEvidenceRejection('unsupported_content');
+    const err = new Error(`Unsupported evidence content type: ${declared}. Accepted: video/*, image/*, application/pdf, text/plain`) as Error & { status: number };
+    err.status = 422;
+    throw err;
+  }
+  if (!sniffed || (declared && declared !== 'application/octet-stream' && declared.split('/')[0] !== sniffed.split('/')[0])) {
+    recordEvidenceRejection('unsupported_content');
+    const err = new Error(`Evidence content does not match an accepted type (declared ${declared || 'none'}, detected ${sniffed ?? 'unknown'}). Accepted: video/*, image/*, application/pdf, text/plain`) as Error & { status: number };
     err.status = 422;
     throw err;
   }
 
-  // Reject based on Content-Length from HEAD if already over the limit.
-  if (contentLength !== null && contentLength > config.evidenceMaxBytes) {
-    const err = new Error(`Evidence file too large: ${contentLength} bytes exceeds the ${config.evidenceMaxBytes}-byte limit`) as Error & { status: number };
-    err.status = 413;
-    throw err;
-  }
-
-  // Step 2: Download the content as a buffer.
-  const response = await axios.get<ArrayBuffer>(url, {
-    responseType: 'arraybuffer',
-    timeout: 30000,
-    maxContentLength: config.evidenceMaxBytes,
-    maxBodyLength: config.evidenceMaxBytes,
-  });
-
-  const downloadedType = (response.headers['content-type'] as string | undefined) ?? contentType;
-  const buffer = Buffer.from(response.data);
-
-  // Validate content type from GET response (may differ from HEAD).
-  if (downloadedType && !isAllowedContentType(downloadedType)) {
-    const err = new Error(`Unsupported evidence content type: ${downloadedType}. Accepted: video/*, image/*, application/pdf, text/plain`) as Error & { status: number };
-    err.status = 422;
-    throw err;
-  }
-
-  // Validate actual downloaded size.
-  if (buffer.length > config.evidenceMaxBytes) {
-    const err = new Error(`Evidence file too large: ${buffer.length} bytes exceeds the ${config.evidenceMaxBytes}-byte limit`) as Error & { status: number };
-    err.status = 413;
-    throw err;
-  }
-
-  const filename = path.basename(new URL(url).pathname) || 'evidence';
-  const mimeType = downloadedType.split(';')[0].trim() || 'application/octet-stream';
-
-  return pinFile(buffer, filename, mimeType);
+  const filename = path.basename(new URL(fetched.finalUrl).pathname) || 'evidence';
+  return pinFile(buffer, filename, sniffed);
 }
 
 export const milestoneSchema = z.object({
@@ -146,15 +154,15 @@ try {
     if (evidenceUri.startsWith('https://')) {
       // Download the remote file, validate its content type and size, then pin to IPFS.
       try {
-        evidenceCid = await downloadAndPinEvidence(evidenceUri);
+        evidenceCid = await downloadAndPinEvidence(evidenceUri, req.account ?? 'unknown');
       } catch (downloadErr) {
         const err = downloadErr as Error & { status?: number };
         if (err.status === 422) {
           res.status(422).json({ success: false, error: err.message });
           return;
         }
-        if (err.status === 413) {
-          res.status(413).json({ success: false, error: err.message });
+        if (err.status === 413 || err.status === 429 || err.status === 502 || err.status === 504) {
+          res.status(err.status).json({ success: false, error: err.message });
           return;
         }
         throw err;
