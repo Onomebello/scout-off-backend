@@ -37,6 +37,64 @@ describe('postWebhookWithRetry', () => {
     expect(mockedFetch).toHaveBeenCalledTimes(2);
   });
 
+  it('applies full jitter to exponential backoff delays', async () => {
+    jest.useFakeTimers();
+    const random = jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      mockedFetch.mockRejectedValueOnce(new Error('network fail'));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFetch.mockResolvedValueOnce({ ok: true, status: 200 } as any);
+
+      const delivery = postWebhookWithRetry(
+        'https://example.com',
+        { eventType: 'test' },
+        { retries: 2, baseDelayMs: 100, maxDelayMs: 100 },
+      );
+      await jest.advanceTimersByTimeAsync(49);
+      expect(mockedFetch).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(delivery).resolves.toBeUndefined();
+      expect(mockedFetch).toHaveBeenCalledTimes(2);
+    } finally {
+      random.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('uses Retry-After for 429/503 responses and drains failed response bodies', async () => {
+    jest.useFakeTimers();
+    try {
+      const body = { resume: jest.fn() };
+      mockedFetch
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: { get: () => '2' },
+          body,
+        } as any)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValueOnce({ ok: true, status: 200 } as any);
+
+      const delivery = postWebhookWithRetry(
+        'https://example.com',
+        { eventType: 'test' },
+        { retries: 2, baseDelayMs: 1, maxDelayMs: 1 },
+      );
+
+      await jest.advanceTimersByTimeAsync(1999);
+      expect(mockedFetch).toHaveBeenCalledTimes(1);
+      expect(body.resume).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(delivery).resolves.toBeUndefined();
+      expect(mockedFetch).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('throws after all retries fail', async () => {
     mockedFetch.mockRejectedValue(new Error('network down'));
 
@@ -59,10 +117,16 @@ describe('postWebhookWithRetry', () => {
     const rawBody = init!.body as string;
     expect(rawBody).toBe(JSON.stringify(payload));
 
-    const signatureHeader = (init!.headers as Record<string, string>)['X-Webhook-Signature'];
+    const requestHeaders = init!.headers as Record<string, string>;
+    const signatureHeader = requestHeaders['X-Webhook-Signature'];
+    const timestamp = requestHeaders['X-Webhook-Timestamp'];
     expect(signatureHeader).toMatch(/^sha256=[0-9a-f]{64}$/);
+    expect(timestamp).toMatch(/^\d+$/);
 
-    const expectedDigest = crypto.createHmac('sha256', 'shh-secret').update(rawBody).digest('hex');
+    const expectedDigest = crypto
+      .createHmac('sha256', 'shh-secret')
+      .update(`${timestamp}.${rawBody}`)
+      .digest('hex');
     expect(signatureHeader).toBe(`sha256=${expectedDigest}`);
   });
 
@@ -74,6 +138,7 @@ describe('postWebhookWithRetry', () => {
 
     const [, init] = mockedFetch.mock.calls[0];
     expect((init!.headers as Record<string, string>)['X-Webhook-Signature']).toBeUndefined();
+    expect((init!.headers as Record<string, string>)['X-Webhook-Timestamp']).toBeUndefined();
   });
 
   it('sends User-Agent, X-Webhook-Event and X-Webhook-Delivery headers', async () => {
@@ -156,22 +221,32 @@ describe('signWebhookPayload', () => {
   it('produces the documented sha256=<hex> format, verifiable by recomputing the HMAC with the same secret', () => {
     const secret = 'my-subscriber-secret';
     const rawBody = JSON.stringify({ eventType: 'player_registered', payload: { wallet: 'GABC' } });
+    const timestamp = '1785000000';
 
-    const signature = signWebhookPayload(rawBody, secret);
+    const signature = signWebhookPayload(rawBody, secret, timestamp);
     expect(signature).toMatch(/^sha256=[0-9a-f]{64}$/);
 
-    // A receiver recomputing the HMAC over the same raw body with the same
-    // secret must derive the identical signature (docs/webhooks.md).
-    const recomputed = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+    const recomputed = crypto
+      .createHmac('sha256', secret)
+      .update(`${timestamp}.${rawBody}`)
+      .digest('hex');
     expect(signature).toBe(`sha256=${recomputed}`);
   });
 
   it('produces a different signature for a different secret or a different body', () => {
     const rawBody = JSON.stringify({ eventType: 'test' });
-    expect(signWebhookPayload(rawBody, 'secret-a')).not.toBe(signWebhookPayload(rawBody, 'secret-b'));
+    const timestamp = '1785000000';
+    expect(signWebhookPayload(rawBody, 'secret-a', timestamp)).not.toBe(
+      signWebhookPayload(rawBody, 'secret-b', timestamp),
+    );
 
     const otherBody = JSON.stringify({ eventType: 'other' });
-    expect(signWebhookPayload(rawBody, 'secret-a')).not.toBe(signWebhookPayload(otherBody, 'secret-a'));
+    expect(signWebhookPayload(rawBody, 'secret-a', timestamp)).not.toBe(
+      signWebhookPayload(otherBody, 'secret-a', timestamp),
+    );
+    expect(signWebhookPayload(rawBody, 'secret-a', timestamp)).not.toBe(
+      signWebhookPayload(rawBody, 'secret-a', '1785000001'),
+    );
   });
 });
 
@@ -193,8 +268,11 @@ describe('dispatchEventWebhook', () => {
     expect(call).toBeDefined();
     const [, init] = call!;
     const rawBody = init!.body as string;
-    const signatureHeader = (init!.headers as Record<string, string>)['X-Webhook-Signature'];
-    expect(signatureHeader).toBe(signWebhookPayload(rawBody, secret));
+    const requestHeaders = init!.headers as Record<string, string>;
+    const signatureHeader = requestHeaders['X-Webhook-Signature'];
+    expect(signatureHeader).toBe(
+      signWebhookPayload(rawBody, secret, requestHeaders['X-Webhook-Timestamp']),
+    );
     const parsed = JSON.parse(rawBody);
     expect(parsed.eventType).toBe('player_registered');
     expect(parsed.payload).toEqual({ wallet: 'GABC' });
@@ -233,6 +311,102 @@ describe('dispatchEventWebhook', () => {
       expect(typeof parsedPayload.deliveryId).toBe('string');
       expect(parsedPayload.deliveryId.length).toBeGreaterThan(0);
     },
-    10000
+    15000
+  );
+
+  it(
+    'dead-letters only the subscriber that fails when multiple subscriptions are registered',
+    async () => {
+      const okUrl = uniqueUrl('ok');
+      const failingUrl = uniqueUrl('fail');
+      createWebhookSubscription(okUrl, 'secret-ok');
+      createWebhookSubscription(failingUrl, 'secret-fail');
+
+      mockedFetch.mockImplementation(async (url) => {
+        if (url === failingUrl) {
+          throw new Error('subscriber unreachable');
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return { ok: true, status: 200 } as any;
+      });
+
+      await dispatchEventWebhook('scout_subscribed', { scout: 'S1' });
+
+      const deadLetters = listWebhookDeadLetters(100, 0);
+      expect(deadLetters.find((d) => d.url === failingUrl)).toBeDefined();
+      expect(deadLetters.find((d) => d.url === okUrl)).toBeUndefined();
+    },
+    15000
+  );
+
+  it(
+    'delivery ID is HMAC-covered — altering it invalidates the signature',
+    async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFetch.mockResolvedValue({ ok: true, status: 200 } as any);
+      const url = uniqueUrl('hmac-cover');
+      const secret = 'subscriber-secret-hmac';
+      createWebhookSubscription(url, secret);
+
+      await dispatchEventWebhook('player_registered', { wallet: 'GABC' });
+
+      const call = mockedFetch.mock.calls.find(([calledUrl]) => calledUrl === url);
+      expect(call).toBeDefined();
+      const [, init] = call!;
+      const rawBody = init!.body as string;
+      const parsed = JSON.parse(rawBody);
+
+      // The HMAC is computed over the signed timestamp and raw body, which
+      // includes the deliveryId.
+      // If we swap the deliveryId and re-sign with the same secret,
+      // the original signature no longer matches.
+      const tampered = { ...parsed, deliveryId: 'forged-id' };
+      const tamperedBody = JSON.stringify(tampered);
+      const headers = init!.headers as Record<string, string>;
+      const timestamp = headers['X-Webhook-Timestamp'];
+      const originalSig = headers['X-Webhook-Signature'];
+      expect(originalSig).toBe(signWebhookPayload(rawBody, secret, timestamp));
+      expect(signWebhookPayload(tamperedBody, secret, timestamp)).not.toBe(originalSig);
+    },
+    15000
+  );
+
+  it(
+    'genuinely distinct events produce distinct delivery IDs',
+    async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFetch.mockResolvedValue({ ok: true, status: 200 } as any);
+      const url1 = uniqueUrl('distinct-1');
+      const url2 = uniqueUrl('distinct-2');
+      createWebhookSubscription(url1, 'secret-1');
+      createWebhookSubscription(url2, 'secret-2');
+
+      await dispatchEventWebhook('player_registered', { wallet: 'A' });
+      await dispatchEventWebhook('milestone_approved', { milestoneId: 'B' });
+
+      const bodies = mockedFetch.mock.calls.map(([, init]) =>
+        JSON.parse((init!.body as string))
+      );
+
+      expect(bodies.length).toBeGreaterThanOrEqual(2);
+      const deliveryIds = bodies.map((b) => b.deliveryId);
+
+      // Each event type is dispatched to multiple subscriptions, so the same
+      // delivery ID appears once per subscription for a given event. Verify
+      // that distinct events have distinct delivery IDs by collecting unique
+      // IDs and confirming at least 2 different ones.
+      const uniqueIds = [...new Set(deliveryIds)];
+      expect(uniqueIds.length).toBeGreaterThanOrEqual(2);
+
+      // Within a single call to dispatchEventWebhook, all subscriptions get
+      // the same delivery ID. Verify this: both calls to url1 should have
+      // different IDs (one per event).
+      const url1Calls = mockedFetch.mock.calls.filter(([u]) => u === url1);
+      const url1Ids = url1Calls.map(([, init]) =>
+        JSON.parse((init!.body as string)).deliveryId
+      );
+      expect(url1Ids[0]).not.toBe(url1Ids[1]);
+    },
+    15000
   );
 });

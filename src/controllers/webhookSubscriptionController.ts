@@ -233,7 +233,8 @@ try {
     const payload = { event: 'test', timestamp: new Date().toISOString() };
     const rawBody = JSON.stringify(payload);
     const plainSecret = decryptWebhookSecret(row.secret);
-    const signature = signWebhookPayload(rawBody, plainSecret);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = signWebhookPayload(rawBody, plainSecret, timestamp);
 
     try {
       const response = await fetch(row.url, {
@@ -241,6 +242,7 @@ try {
         body: rawBody,
         headers: {
           'Content-Type': 'application/json',
+          'X-Webhook-Timestamp': timestamp,
           'X-Webhook-Signature': signature,
         },
       });
