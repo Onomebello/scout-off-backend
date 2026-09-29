@@ -23,6 +23,8 @@ import { resolvers } from './resolvers';
 import { createContext } from './context';
 import { createDepthLimitRule, createQueryCostRule, MAX_DEPTH, MAX_QUERY_COST } from './validation';
 import { logger } from '../utils/logger';
+import { createPersistedOperationsPlugin } from './persisted-operations';
+import config from '../config';
 
 // ─── Production introspection-blocking plugin ────────────────────────────────
 
@@ -71,6 +73,13 @@ function createBlockIntrospectionPlugin() {
 export function mountGraphQL(app: Application): void {
   const isProduction = process.env.NODE_ENV === 'production';
 
+  // Persisted operations plugin is always enabled (controls both dev and prod modes)
+  const plugins = [
+    useValidationRule(createDepthLimitRule(MAX_DEPTH)),
+    createPersistedOperationsPlugin(),
+    ...(isProduction ? [createBlockIntrospectionPlugin()] : []),
+  ];
+  
   const yoga = createYoga({
     schema: createSchema({
       typeDefs,

@@ -26,3 +26,6 @@ pr-808.md
 pr-807.md
 jest.scoutNotes.config.js
 
+
+# PR description files (local working notes, not for review)
+pr-*.md
