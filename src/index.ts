@@ -199,6 +199,29 @@ async function startServer() {
 
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
+
+  // Process-level safety nets (#1391). Registered once, after `shutdown` is
+  // defined, so uncaught exceptions can trigger the same graceful shutdown.
+  let unhandledRejectionsTotal = 0;
+
+  process.on("unhandledRejection", (reason: unknown) => {
+    unhandledRejectionsTotal += 1;
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    logger.error(
+      `Unhandled promise rejection (scout_off_unhandled_rejections_total=${unhandledRejectionsTotal}):`,
+      err.stack ?? err.message,
+    );
+    // Do not exit by default; set EXIT_ON_UNHANDLED_REJECTION=true to opt in.
+    if (config.exitOnUnhandledRejection) {
+      shutdown("unhandledRejection");
+    }
+  });
+
+  process.on("uncaughtException", (err: Error) => {
+    logger.error("Uncaught exception, shutting down:", err.stack ?? err.message);
+    shutdown("uncaughtException");
+    process.exitCode = 1;
+  });
 }
 
 start().catch((err) => {

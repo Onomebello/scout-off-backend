@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import config from '../config';
+import { ErrorCode } from '../utils/errorCodes';
 
 /**
  * Returns an Express middleware that times out the request after `ms` milliseconds.
@@ -25,7 +26,7 @@ export function createTimeout(ms: number) {
         res.status(503).json({
           success: false,
           error: 'Request timed out',
-          code: 'REQUEST_TIMEOUT',
+          code: ErrorCode.REQUEST_TIMEOUT,
         });
       }
     }, ms);
