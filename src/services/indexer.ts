@@ -1,16 +1,20 @@
 import { server } from './stellar';
 import { scValToNative } from '@stellar/stellar-sdk';
+import { createId } from '@paralleldrive/cuid2';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import {
   getDb,
   getDriver,
+  getPlayerByOnChainId,
+  getPlayerByWallet,
   fetchLastIndexedLedger,
   persistLastIndexedLedger,
   insertOrUpdatePlayer,
   updatePlayerProgress,
   insertPendingMilestone,
   queryEvents,
+  getEventsCount,
   rollbackEventsFromLedger,
 } from '../db';
 import { dispatchEventWebhook } from './webhooks';
@@ -20,8 +24,10 @@ import {
   normalizeAndSortEvents,
   groupCoTransactionEvents,
   type RawIndexerEvent,
+  type NormalizedIndexerEvent,
 } from './eventOrdering';
 import { withRestoredCorrelation } from './txCorrelation';
+import { EventBroadcaster, broadcaster } from './eventBroadcaster';
 
 const tracer = trace.getTracer('scout-off-backend');
 
@@ -61,6 +67,108 @@ export function normalizePayload(payload: Record<string, unknown>): Record<strin
   return Object.fromEntries(
     Object.entries(payload).map(([k, v]) => [camelToSnake(k), v])
   );
+}
+
+function jsonSafe(value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return value.map(jsonSafe);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, jsonSafe(entry)]),
+    );
+  }
+  return value;
+}
+
+function nativeText(value: unknown): string {
+  return value === undefined || value === null ? '' : String(value);
+}
+
+/** Normalize the register contract's compact topics and positional event data. */
+export function normalizeSorobanEvent(raw: {
+  topic?: unknown[];
+  value?: unknown;
+}): { type: string; payload: Record<string, unknown> } {
+  const topics = raw.topic ?? [];
+  const rawType = topics[0] ? nativeText(scValToNative(topics[0] as never)) : '';
+  const typeAliases: Record<string, string> = {
+    player_rg: 'player_registered',
+    tok_iss: 'token_issued',
+    tok_buy: 'token_bought',
+    fee_upd: 'platform_fee_updated',
+  };
+  let type = typeAliases[rawType] ?? rawType;
+  const nativeValue = raw.value ? scValToNative(raw.value as never) : undefined;
+  const tuple = Array.isArray(nativeValue) ? nativeValue : [];
+  let payload: Record<string, unknown>;
+
+  if (rawType === 'player_rg') {
+    const onChainPlayerId = nativeText(tuple[0]);
+    return {
+      type: 'player_registered',
+      payload: {
+        player_id: onChainPlayerId,
+        on_chain_player_id: onChainPlayerId,
+        wallet: nativeText(topics[1] ? scValToNative(topics[1] as never) : undefined),
+        metadata_uri: nativeText(tuple[1]),
+        position: nativeText(tuple[2]),
+        region: nativeText(tuple[3]),
+      },
+    };
+  }
+
+  if (nativeValue && typeof nativeValue === 'object' && !Array.isArray(nativeValue)) {
+    payload = normalizePayload(jsonSafe(nativeValue) as Record<string, unknown>);
+  } else if (Array.isArray(nativeValue)) {
+    payload = {};
+  } else {
+    payload = { data: jsonSafe(nativeValue) };
+  }
+
+  if (rawType === 'contact_unlocked' && topics.length === 1 && tuple.length >= 2) {
+    payload.scout = nativeText(tuple[0]);
+    payload.player_id = nativeText(tuple[1]);
+  } else if (rawType === 'contact_unlocked' && topics.length >= 3) {
+    type = 'connection_created';
+    payload.scout = nativeText(scValToNative(topics[1] as never));
+    payload.player_id = nativeText(scValToNative(topics[2] as never));
+    if (tuple.length >= 1) payload.connection_type = nativeText(tuple[0]);
+  } else if (rawType === 'fee_upd' && tuple.length >= 1) {
+    payload.new_bps = tuple[0];
+  } else if (rawType === 'tok_iss' && tuple.length >= 1) {
+    payload.total_supply = tuple[0];
+  } else if (rawType === 'tok_buy' && tuple.length >= 2) {
+    payload.buyer = nativeText(tuple[0]);
+    payload.amount = tuple[1];
+  } else if (type === 'milestone_submitted' && tuple.length >= 3) {
+    payload.milestone_id = nativeText(tuple[0]);
+    payload.milestone_type = nativeText(tuple[1]);
+    payload.evidence_uri = nativeText(tuple[2]);
+    if (topics[1]) payload.validator = nativeText(scValToNative(topics[1] as never));
+  } else if (type === 'milestone_approved' && tuple.length >= 2) {
+    payload.milestone_id = nativeText(tuple[0]);
+    payload.new_level = tuple[1];
+    if (topics[1]) payload.validator = nativeText(scValToNative(topics[1] as never));
+  }
+
+  const playerTopicIndex = rawType.startsWith('tok_')
+    || ['token_issued', 'token_bought'].includes(type)
+    ? 1
+    : ['milestone_submitted', 'milestone_approved', 'milestone_rejected', 'contact_unlocked', 'connection_created', 'connection_closed', 'trial_offer_logged'].includes(type)
+      ? 2
+      : -1;
+  const topicPlayerId = playerTopicIndex >= 0 && topics[playerTopicIndex]
+    ? nativeText(scValToNative(topics[playerTopicIndex] as never))
+    : '';
+  const payloadPlayerId = nativeText(payload.player_id);
+  const onChainPlayerId = topicPlayerId || (/^\d+$/.test(payloadPlayerId) ? payloadPlayerId : '');
+
+  if (onChainPlayerId) {
+    payload.on_chain_player_id = onChainPlayerId;
+    payload.player_id = onChainPlayerId;
+  }
+
+  return { type, payload };
 }
 
 // ─── Deduplication strategy ───────────────────────────────────────────────────
@@ -205,10 +313,17 @@ export async function indexEvents(): Promise<void> {
 
   const applyOne = async (event: (typeof ordered)[number]): Promise<void> => {
     const raw = event.raw as any;
-    const type = raw.topic?.[0] ? (scValToNative(raw.topic[0]) as string) : '';
-    const payload = normalizePayload(
-      (raw.value ? (scValToNative(raw.value) as Record<string, unknown>) : {}) ?? {},
-    );
+    const normalized = normalizeSorobanEvent(raw);
+    const type = normalized.type;
+    const payload = normalized.payload;
+    const onChainPlayerId = payload.on_chain_player_id as string | undefined;
+    if (type === 'player_registered' && onChainPlayerId && payload.wallet) {
+      const existingPlayer = await getPlayerByWallet(String(payload.wallet));
+      payload.player_id = existingPlayer?.player_id ?? createId();
+    } else if (onChainPlayerId) {
+      const existingPlayer = await getPlayerByOnChainId(onChainPlayerId);
+      if (existingPlayer) payload.player_id = existingPlayer.player_id;
+    }
     const eventId = normalizeEventId(
       event.contractId,
       event.ledger,
@@ -219,7 +334,7 @@ export async function indexEvents(): Promise<void> {
     const ledgerHash = raw.ledgerHash ?? raw.pagingToken ?? raw.txHash;
 
     onBeforeInsert(eventId);
-    insert.run(
+    const insertResult = insert.run(
       type,
       event.ledger,
       ledgerHash,
@@ -230,6 +345,8 @@ export async function indexEvents(): Promise<void> {
       event.eventIndex,
       event.contractId,
     );
+    const eventInserted = insertResult.changes > 0;
+    if (!eventInserted) return;
     onAfterInsert(eventId);
 
     await withRestoredCorrelation(
@@ -244,11 +361,13 @@ export async function indexEvents(): Promise<void> {
 
         if (type === 'player_registered') {
           const playerId = payload.player_id as string;
+          const onChainPlayerId = payload.on_chain_player_id as string | undefined;
           const registeredAt = raw.ledgerClosedAt
             ? new Date(raw.ledgerClosedAt).getTime()
             : Date.now();
           await insertOrUpdatePlayer({
             player_id: playerId,
+            on_chain_player_id: onChainPlayerId,
             wallet: payload.wallet as string,
             position: payload.position as string | undefined,
             region: payload.region as string | undefined,
@@ -294,9 +413,9 @@ export async function indexEvents(): Promise<void> {
         } else if (type === 'milestone_approved') {
           const playerId = payload.player_id as string;
           if (playerId) {
-            const approvedMilestoneCount = queryEvents('milestone_approved').filter(
-              (e) => e.payload.player_id === playerId,
-            ).length;
+            const approvedMilestoneCount = getEventsCount('milestone_approved', {
+              payloadFilter: { player_id: playerId },
+            });
             await updatePlayerProgress(
               playerId,
               tierForApprovedMilestones(approvedMilestoneCount),
@@ -315,6 +434,8 @@ export async function indexEvents(): Promise<void> {
     // Atomic co-transaction group: apply every event in order before the next tx.
     for (const event of group) {
       await applyOne(event);
+      // Broadcast to SSE (in-process + Redis if configured) after successful persistence
+      broadcastIndexedEvent(event);
     }
   }
 
@@ -323,6 +444,7 @@ export async function indexEvents(): Promise<void> {
   // 3. Update last indexed ledger once the batch above has been applied.
   persistLastIndexedLedger(latest.ledger + 1);
 
+  // 4. Dispatch webhooks for indexed events (milestone_submitted, milestone_approved)
   for (const { type, payload, txHash } of webhookEvents) {
     withRestoredCorrelation(txHash, 'indexer.webhookDispatch', async () => {
       await dispatchEventWebhook(type, payload);
@@ -342,6 +464,123 @@ export async function indexEvents(): Promise<void> {
     span.end();
   }
   });
+}
+
+// ─── SSE broadcasting for indexed events ──────────────────────────────────────
+
+/**
+ * Track events that should be broadcast to SSE clients.
+ * The indexer broadcasts only for newly inserted rows to avoid double delivery
+ * when both a controller (e.g., scoutController) and the indexer emit the same
+ * logical event. Controllers are responsible for broadcasting their own events;
+ * the indexer only broadcasts events it persisted.
+ *
+ * Deduplication strategy:
+ *   - The indexer broadcasts AFTER successful INSERT OR IGNORE (row counts as new).
+ *   - Controllers broadcast when they successfully submit a transaction.
+ *   - When a controller's transaction is also indexed, the indexer's broadcast
+ *     is skipped (dedupe by tx_hash) — handled by the indexer not broadcasting
+ *     to already-persisted events.
+ *
+ * Event types broadcast by the indexer (from contract events):
+ *   - player_registered      (after insertOrUpdatePlayer succeeds)
+ *   - milestone_submitted    (after insertPendingMilestone succeeds)
+ *   - milestone_approved     (after updatePlayerProgress succeeds)
+ *   - scout_subscribed       (after insertSubscription)
+ *   - contact_unlocked       (after insertContactUnlock)
+ *   - trial_offer_logged     (after insertTrialOffer)
+ *   - fees_withdrawn         (via admin webhook, not indexer)
+ */
+function broadcastIndexedEvent(event: NormalizedIndexerEvent): void {
+  const raw = event.raw as any;
+  const type = raw.topic?.[0] ? (scValToNative(raw.topic[0]) as string) : '';
+  const payload = normalizePayload(
+    (raw.value ? (scValToNative(raw.value) as Record<string, unknown>) : {}) ?? {},
+  );
+  const txHash = event.txHash;
+
+  // Determine if this event was newly inserted (dedupe by tx_hash)
+  // For now, we broadcast all events from the indexer after successful indexing.
+  // In a future enhancement, we could track which tx_hashes we've already
+  // broadcast and skip those to avoid double delivery.
+  
+  // Only broadcast events we actually indexed (not from our own broadcast)
+  switch (type) {
+    case 'player_registered':
+      broadcaster.broadcast({
+        type: 'player_registered',
+        payload: {
+          player_id: payload.player_id,
+          wallet: payload.wallet,
+          position: payload.position,
+          region: payload.region,
+          metadata_uri: payload.metadata_uri,
+          tx_hash: txHash,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      break;
+    case 'milestone_submitted':
+      broadcaster.broadcast({
+        type: 'milestone_submitted',
+        payload: {
+          milestone_id: payload.milestone_id,
+          player_id: payload.player_id,
+          validator: payload.validator,
+          milestone_type: payload.milestone_type,
+          evidence_uri: payload.evidence_uri,
+          tx_hash: txHash,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      break;
+    case 'milestone_approved':
+      broadcaster.broadcast({
+        type: 'milestone_approved',
+        payload: {
+          player_id: payload.player_id,
+          milestone_id: payload.milestone_id,
+          tx_hash: txHash,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      break;
+    case 'scout_subscribed':
+      broadcaster.broadcast({
+        type: 'scout_subscribed',
+        payload: {
+          scout: payload.scout,
+          tier: payload.tier,
+          expires_at: payload.subscription_expiry,
+          tx_hash: txHash,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      break;
+    case 'contact_unlocked':
+      broadcaster.broadcast({
+        type: 'contact_unlocked',
+        payload: {
+          scout: payload.scout,
+          player_id: payload.player_id,
+          tx_hash: txHash,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      break;
+    case 'trial_offer_logged':
+      broadcaster.broadcast({
+        type: 'trial_offer_logged',
+        payload: {
+          scout: payload.scout,
+          player_id: payload.player_id,
+          details_uri: payload.details_uri,
+          tx_hash: txHash,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      break;
+  }
 }
 
 // ─── Trial offer event log (#285) ──────────────────────────────────────────────

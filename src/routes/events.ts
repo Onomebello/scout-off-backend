@@ -7,15 +7,21 @@ import {
   BroadcastEvent,
 } from '../services/eventBroadcaster';
 import { ContractEventType } from '../types';
+import { getPlayerByWallet } from '../db';
 import { logger } from '../utils/logger';
+import { ErrorCode } from '../utils/errorCodes';
 import {
   isWalletBlocklisted,
   refreshBlockedWallets,
   onWalletBlocked,
 } from '../services/walletBlocklist';
 import * as tokenBlocklistModule from '../services/tokenBlocklist';
+import config from '../config';
 
 const router = Router();
+
+/** Seconds a client should wait before retrying when the SSE connection limit is hit. */
+const SSE_CAPACITY_RETRY_AFTER_SECONDS = 30;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -47,6 +53,52 @@ const AUTH_SWEEP_INTERVAL_MS = parseInt(
  *  (not cached at module load) so tests can flip it per-case. */
 function getMaxSseConnections(): number {
   return parseInt(process.env.SSE_MAX_CONNECTIONS ?? '0', 10);
+}
+
+/**
+ * Compute the SSE reconnect retry interval in milliseconds.
+ * Read live so tests can override process.env.SSE_RETRY_MS per-test.
+ * Applies a small random jitter (up to 20% of base) per connection to prevent
+ * synchronized reconnect storms across clients.
+ */
+export function getSseRetryMs(baseMs: number = config.sseRetryMs): number {
+  const envVal = process.env.SSE_RETRY_MS;
+  const parsed = envVal !== undefined ? parseInt(envVal, 10) : baseMs;
+  const effectiveBase = Number.isFinite(parsed) && parsed > 0 ? parsed : 5000;
+  const maxJitter = Math.max(1, Math.floor(effectiveBase * 0.2));
+  const jitter = Math.floor(Math.random() * maxJitter);
+  return effectiveBase + jitter;
+}
+
+/** Maximum concurrent streams per authenticated wallet (0 = unlimited). */
+function getMaxSseConnectionsPerWallet(): number {
+  const configured = Number.parseInt(process.env.SSE_MAX_CONNECTIONS_PER_WALLET ?? '5', 10);
+  return Number.isInteger(configured) && configured >= 0 ? configured : 5;
+}
+
+/** Reject a stream when either the process-wide or per-wallet cap is reached. */
+function rejectAtConnectionLimit(wallet: string, res: Response): boolean {
+  const maxSseConnections = getMaxSseConnections();
+  if (maxSseConnections > 0 && broadcaster.subscriberCount >= maxSseConnections) {
+    res.setHeader('Retry-After', String(SSE_CAPACITY_RETRY_AFTER_SECONDS));
+    res.status(503).json({
+      success: false,
+      error: 'SSE connection limit reached. Please try again later.',
+      code: ErrorCode.SSE_CAPACITY,
+    });
+    return true;
+  }
+
+  const maxPerWallet = getMaxSseConnectionsPerWallet();
+  if (maxPerWallet > 0 && broadcaster.getSubscriberCountForWallet(wallet) >= maxPerWallet) {
+    res.status(429).json({
+      success: false,
+      error: 'SSE connection limit for this account reached. Please try again later.',
+    });
+    return true;
+  }
+
+  return false;
 }
 
 // ─── Valid event type set (for query param validation) ────────────────────────
@@ -121,7 +173,7 @@ interface ActiveSession {
   jti: string | undefined;
   subscriber: SseSubscriber;
   /** Terminate the connection; safe to call more than once. */
-  terminate: (reason: 'token_revoked' | 'wallet_blocklisted') => void;
+  terminate: (reason: 'token_revoked' | 'wallet_blocklisted' | 'token_expired' | 'server_shutdown') => void;
 }
 
 /** Sessions currently open in this process. */
@@ -159,6 +211,34 @@ export async function runAuthorizationSweep(): Promise<void> {
 // alive; skips all work when no SSE sessions are open.
 let authSweepTimer: NodeJS.Timeout | null = null;
 
+/**
+ * Drain all active SSE sessions for a graceful shutdown.
+ * Sends a `session_ended` frame with `reason: server_shutdown` to every
+ * connected client, ends each response, and clears the activeSessions set.
+ * Safe to call multiple times (no-op when already empty).
+ */
+export function drainAllSessions(): void {
+  if (activeSessions.size === 0) return;
+  logger.info(`[sse] draining ${activeSessions.size} session(s) for shutdown`);
+  for (const session of [...activeSessions]) {
+    try {
+      session.terminate('server_shutdown' as Parameters<typeof session.terminate>[0]);
+    } catch (err) {
+      logger.warn(`[sse] error terminating session wallet=${session.wallet}:`, err);
+    }
+  }
+  activeSessions.clear();
+}
+
+/**
+ * Return `true` when the server is accepting new SSE connections.
+ * Set to `false` during graceful shutdown so new connections are rejected
+ * with 503 before server.close() drains keep-alive idle connections.
+ */
+let _acceptingSseSessions = true;
+export function setAcceptingSseSessions(v: boolean): void { _acceptingSseSessions = v; }
+export function isAcceptingSseSessions(): boolean { return _acceptingSseSessions; }
+
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 /**
@@ -179,8 +259,10 @@ let authSweepTimer: NodeJS.Timeout | null = null;
  *                When omitted no additional player-level filtering is applied.
  *
  * Filtering: only events relevant to the authenticated wallet are sent (wallet
- * isolation is always enforced regardless of query params).  The optional
- * query params add further narrowing on top.
+ * isolation is always enforced regardless of query params). Player events are
+ * matched through the authenticated wallet's player record, since their payload
+ * carries a player ID rather than a wallet address. Optional query params add
+ * further narrowing on top.
  *
  * SSE event types sent:
  *   - milestone_approved  (player: their own milestone approvals)
@@ -198,11 +280,17 @@ let authSweepTimer: NodeJS.Timeout | null = null;
  *     no further protected events are delivered.
  *   - If the wallet is blocklisted while the stream is open, the same
  *     termination happens with reason "wallet_blocklisted".
+ *   - When the access JWT expires, the stream closes with reason "token_expired".
  *   - Detection bound: immediate for revocations/blocklists processed in
  *     this process; ≤ SSE_AUTH_SWEEP_INTERVAL_MS (default 30 s) for changes
  *     persisted by another instance (one sweep query per process, never a
  *     DB query per keep-alive tick).
  *   - Blocklisted wallets cannot open a new connection (403).
+ *   - Concurrent streams are limited per wallet by
+ *     SSE_MAX_CONNECTIONS_PER_WALLET (default 5; 0 = unlimited).
+ *
+ * Reconnection: initial `retry:` hint is sent on connect (configured via
+ * SSE_RETRY_MS, default 5000 ms + up to 20% random jitter) to prevent reconnect storms.
  *
  * Keep-alive: a `: ping` comment is sent every SSE_KEEPALIVE_INTERVAL_MS ms
  * (default 15 s) to prevent idle-connection timeouts.
@@ -211,11 +299,21 @@ let authSweepTimer: NodeJS.Timeout | null = null;
  * @response 200 text/event-stream — long-lived SSE connection
  * @response 400 { success: false, error: string, code: string, validEventTypes: string[] } — unknown eventType
  * @response 401 { success: false, error: string } — missing or invalid token
- * @response 403 { success: false, error: string } — wallet is blocklisted
- * @response 503 { success: false, error: string } — connection limit reached
+ * @response 403 { success: false, error: string, code: 'WALLET_BLOCKLISTED' } — wallet is blocklisted
+ * @response 429 { success: false, error: string } — per-wallet connection limit reached
+ * @response 503 { success: false, error: string, code: 'SSE_CAPACITY' } — global connection limit reached (sets Retry-After)
  */
 router.get('/stream', requireAuth, async (req: Request, res: Response) => {
   const wallet = req.account!;
+
+  // ── Draining guard: reject new SSE connections during shutdown ────────────
+  if (!isAcceptingSseSessions()) {
+    res.status(503).json({
+      success: false,
+      error: 'Server is shutting down; no new SSE connections are accepted',
+    });
+    return;
+  }
 
   // ── Blocklist gate: blocklisted wallets may not open a stream ────────────
   if (await isWalletBlocklisted(wallet)) {
@@ -223,19 +321,21 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
     res.status(403).json({
       success: false,
       error: 'Account is blocklisted; SSE access revoked',
+      code: ErrorCode.WALLET_BLOCKLISTED,
     });
     return;
   }
 
   // ── Connection limit guard ─────────────────────────────────────────────────
-  const maxSseConnections = getMaxSseConnections();
-  if (maxSseConnections > 0 && broadcaster.subscriberCount >= maxSseConnections) {
-    res.status(503).json({
-      success: false,
-      error: 'SSE connection limit reached. Please try again later.',
-    });
-    return;
-  }
+  if (rejectAtConnectionLimit(wallet, res)) return;
+
+  // Resolve the player's cuid2 once per connection; contract events carry the
+  // player ID, while authentication identifies the owner by wallet.
+  const player = await getPlayerByWallet(wallet);
+
+  // Re-check after the async lookup to prevent simultaneous requests from
+  // passing the cap before either one has registered as a subscriber.
+  if (rejectAtConnectionLimit(wallet, res)) return;
 
   // ── Parse optional filter query params ────────────────────────────────────
   const rawEventType = req.query.eventType as string | undefined;
@@ -248,10 +348,149 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
       error: `Unknown eventType value(s): ${parsedEventTypes.invalid.join(', ')}`,
       code: 'VALIDATION_ERROR',
       validEventTypes: Array.from(VALID_EVENT_TYPES),
+  const eventTypes = new Set<ContractEventType>();
+  if (rawEventType && VALID_EVENT_TYPES.has(rawEventType as ContractEventType)) {
+    eventTypes.add(rawEventType as ContractEventType);
+  }
+
+  const filter: SseFilterCriteria | undefined =
+    eventTypes.size > 0 || rawPlayerId !== undefined
+      ? {
+          eventTypes,
+          playerId: rawPlayerId,
+        }
+      : undefined;
+
+  // ── SSE response headers ───────────────────────────────────────────────────
+  // Disable the request-level timeout middleware for this long-lived connection.
+  req.socket.setTimeout(0);
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx proxy buffering
+  res.flushHeaders();
+
+  // Send an initial retry hint (with random jitter) and connected event.
+  const retryMs = getSseRetryMs();
+  res.write(`retry: ${retryMs}\n\nevent: connected\ndata: ${JSON.stringify({ wallet })}\n\n`);
+
+  // ── Session lifecycle (termination + cleanup) ──────────────────────────────
+  let terminated = false;
+  const cleanupFns: Array<() => void> = [];
+  let keepAliveTimer: NodeJS.Timeout | null = null;
+  let tokenExpiryTimer: NodeJS.Timeout | null = null;
+
+  const subscriber: SseSubscriber = {
+    wallet,
+    playerId: player?.player_id,
+    filter,
+    send(event: BroadcastEvent): void {
+      // write() returns false when the kernel buffer is full; we ignore the
+      // back-pressure signal here because SSE is fire-and-forget.
+      try {
+        res.write(formatSseFrame(event));
+      } catch {
+        // Stream already closed — nothing else to do.
+      }
+    },
+  };
+
+  const cleanup = (): void => {
+    if (terminated) return;
+    terminated = true;
+    if (keepAliveTimer) clearInterval(keepAliveTimer);
+    if (tokenExpiryTimer) clearTimeout(tokenExpiryTimer);
+    broadcaster.unsubscribe(subscriber);
+    activeSessions.delete(session);
+    for (const fn of cleanupFns) {
+      try { fn(); } catch { /* listener cleanup is best-effort */ }
+    }
+    cleanupFns.length = 0;
+    logger.info(`[sse] client disconnected wallet=${wallet} total=${broadcaster.subscriberCount}`);
+  };
+
+  const terminate = (reason: 'token_revoked' | 'wallet_blocklisted' | 'token_expired' | 'server_shutdown'): void => {
+    if (terminated || res.writableEnded) return;
+    logger.warn(`[sse] terminating session wallet=${wallet} reason=${reason}`);
+    try {
+      res.write(`event: session_ended\ndata: ${JSON.stringify({ reason })}\n\n`);
+      res.end();
+    } catch (err) {
+      logger.warn(`[sse] error writing session_ended for ${wallet}:`, err);
+    }
+    cleanup();
+  };
+
+  const session: ActiveSession = {
+    wallet,
+    jti: req.jti,
+    subscriber,
+    terminate,
+  };
+
+  activeSessions.add(session);
+  broadcaster.subscribe(subscriber);
+  logger.info(`[sse] client connected wallet=${wallet} total=${broadcaster.subscriberCount}`);
+
+  // ── Live revocation/blocklist listeners (in-process, immediate) ───────────
+  if (req.jti && tokenBlocklistModule.onTokenRevoked) {
+    // Guarded: tests that mock the tokenBlocklist module may not provide
+    // onTokenRevoked — in that case in-process revocation listeners are
+    // simply unavailable and the bounded sweep still applies.
+    const unsubscribeRevoked = tokenBlocklistModule.onTokenRevoked((jti: string) => {
+      if (jti === session.jti) session.terminate('token_revoked');
     });
     return;
   }
 
   const eventTypes = parsedEventTypes.types;
+  // ── Keep-alive ─────────────────────────────────────────────────────────────
+  keepAliveTimer = setInterval(() => {
+    // Check if the response is still writable before writing.
+    if (res.writableEnded) {
+      cleanup();
+      return;
+    }
+    res.write(KEEPALIVE_FRAME);
+  }, KEEPALIVE_INTERVAL_MS);
+
+  // ── Cleanup on disconnect ─────────────────────────────────────────────────
+  const onClose = cleanup;
+  req.on('close', onClose);
+  req.on('aborted', onClose);
+  cleanupFns.push(() => {
+    req.removeListener('close', onClose);
+    req.removeListener('aborted', onClose);
+  });
+
+  // End the stream at the JWT's own expiry rather than allowing the initial
+  // authentication decision to authorize an unbounded connection.
+  if (req.tokenExpiresAt !== undefined) {
+    const tokenExpiresAtMs = req.tokenExpiresAt * 1000;
+    const enforceExpiry = (): void => {
+      const remainingMs = tokenExpiresAtMs - Date.now();
+      if (remainingMs <= 0) {
+        session.terminate('token_expired');
+        return;
+      }
+      tokenExpiryTimer = setTimeout(enforceExpiry, Math.min(remainingMs, 2_147_483_647));
+    };
+    enforceExpiry();
+  }
+
+  // Start the shared sweep timer once the first connection opens.
+  if (!authSweepTimer) {
+    authSweepTimer = setInterval(() => {
+      void runAuthorizationSweep().catch((err: unknown) => {
+        logger.error(
+          '[sse] authorization sweep failed:',
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    }, AUTH_SWEEP_INTERVAL_MS);
+    authSweepTimer.unref();
+  }
+});
 
   /* … truncated 4318 chars — edit only what you need near the top … */

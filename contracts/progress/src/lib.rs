@@ -5,7 +5,9 @@ use soroban_sdk::{
 };
 use scout_off_shared::{
     errors::Error,
-    storage::{bump_instance, is_initialized, set_initialized},
+    storage::{
+        bump_instance, is_initialized, is_paused, set_initialized, set_paused, Page, MAX_PAGE_SIZE,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +71,44 @@ impl ProgressContract {
             .instance()
             .set(&DataKey::MilestoneCounter, &0u64);
         set_initialized(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Pause milestone submissions and approvals. Only the admin may call this.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        set_paused(&env, true);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Resume milestone submissions and approvals. Only the admin may call this.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        set_paused(&env, false);
         bump_instance(&env);
         Ok(())
     }
@@ -166,6 +206,9 @@ impl ProgressContract {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
         }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
         validator.require_auth();
 
         // InvalidValidator(4)
@@ -252,6 +295,9 @@ impl ProgressContract {
     ) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
+        }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
         }
         validator.require_auth();
 
@@ -345,6 +391,67 @@ impl ProgressContract {
         }
         results
     }
+
+    /// Return a page of milestone data for a player.
+    /// 
+    /// This is the paginated variant of [`get_milestones`]. It returns at most `limit` milestones
+    /// starting from the given `start` index. Use `next` in the returned [`Page`] to fetch
+    /// subsequent pages until it is `None`.
+    /// 
+    /// # Arguments
+    /// * `player_id` - The unique player identifier whose milestones to retrieve.
+    /// * `start` - Zero-based index of the first milestone to return
+    /// * `limit` - Maximum number of milestones to return (capped at MAX_PAGE_SIZE = 50)
+    /// 
+    /// # Returns
+    /// A [`Page<MilestoneData>`] containing:
+    /// * `items`: The slice of milestones for this page
+    /// * `next`: The start index for the next page, or `None` if no more results
+    /// 
+    /// # Errors
+    /// * [`Error::InvalidInput`] — `start` or `limit` is invalid
+    pub fn get_milestones_page(
+        env: Env,
+        player_id: u64,
+        start: u32,
+        limit: u32,
+    ) -> Result<Page<MilestoneData>, Error> {
+        // Validate inputs
+        if limit == 0 {
+            return Err(Error::InvalidInput);
+        }
+        let max_limit = MAX_PAGE_SIZE;
+        let effective_limit = limit.min(max_limit);
+        
+        let milestone_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlayerMilestones(player_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = milestone_ids.len() as u32;
+        if start >= total {
+            return Ok(Page { items: Vec::new(&env), next: None });
+        }
+
+        let end = (start + effective_limit).min(total);
+        
+        let mut results = Vec::new(&env);
+        for i in start..end {
+            let mid = milestone_ids.get_unchecked(i as usize);
+            if let Some(data) = env
+                .storage()
+                .instance()
+                .get::<DataKey, MilestoneData>(&DataKey::Milestone(mid))
+            {
+                results.push_back(data);
+            }
+        }
+        
+        let next = if end < total { Some(end) } else { None };
+        
+        Ok(Page { items: results, next })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +515,39 @@ mod tests {
             &String::from_str(&env, "ipfs://evidence"),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn pause_blocks_submissions_and_approvals_until_unpaused() {
+        let env = Env::default();
+        let (prog, reg, admin) = setup(&env);
+        let player_id = register_player(&env, &reg);
+        let validator = Address::generate(&env);
+        prog.register_validator(&validator);
+        let milestone_id = prog.submit_milestone(
+            &validator,
+            &player_id,
+            &String::from_str(&env, "identity"),
+            &String::from_str(&env, "ipfs://evidence"),
+        );
+
+        prog.pause(&admin);
+        assert!(matches!(
+            prog.try_submit_milestone(
+                &validator,
+                &player_id,
+                &String::from_str(&env, "performance"),
+                &String::from_str(&env, "ipfs://evidence-2"),
+            ),
+            Err(Ok(Error::ContractPaused))
+        ));
+        assert!(matches!(
+            prog.try_approve_milestone(&validator, &milestone_id),
+            Err(Ok(Error::ContractPaused))
+        ));
+
+        prog.unpause(&admin);
+        prog.approve_milestone(&validator, &milestone_id);
     }
 
     #[test]

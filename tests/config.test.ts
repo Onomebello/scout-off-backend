@@ -334,9 +334,14 @@ describe('parseNumericEnv validation', () => {
     'RATE_LIMIT_MAX',
     'AUTH_RATE_LIMIT_WINDOW_MS',
     'AUTH_RATE_LIMIT_MAX',
+    'AUTH_RATE_LIMIT_IP_MAX',
     'PLAYER_IMPORT_RATE_LIMIT_WINDOW_MS',
     'PLAYER_IMPORT_RATE_LIMIT_MAX',
     'REQUEST_TIMEOUT_MS',
+    'SQLITE_BUSY_TIMEOUT_MS',
+    'DB_STATEMENT_TIMEOUT_MS',
+    'DB_QUERY_TIMEOUT_MS',
+    'DB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS',
     'LOG_SAMPLE_RATE',
     'SUBSCRIPTION_GRACE_PERIOD_HOURS',
     'PLAYER_CACHE_TTL_MS',
@@ -499,6 +504,23 @@ describe('parseNumericEnv validation', () => {
   it('REQUEST_TIMEOUT_MS: 0 is below min (1) and throws naming REQUEST_TIMEOUT_MS', async () => {
     process.env.REQUEST_TIMEOUT_MS = '0';
     await expectThrowsContaining('REQUEST_TIMEOUT_MS');
+  });
+
+  it('loads configurable database timeout values', async () => {
+    process.env.SQLITE_BUSY_TIMEOUT_MS = '2500';
+    process.env.DB_STATEMENT_TIMEOUT_MS = '20000';
+    process.env.DB_QUERY_TIMEOUT_MS = '25000';
+    process.env.DB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS = '45000';
+    const cfg = await loadConfig();
+    expect(cfg.sqliteBusyTimeoutMs).toBe(2500);
+    expect(cfg.databaseStatementTimeoutMs).toBe(20000);
+    expect(cfg.databaseQueryTimeoutMs).toBe(25000);
+    expect(cfg.databaseIdleTransactionTimeoutMs).toBe(45000);
+  });
+
+  it('rejects invalid database timeout values', async () => {
+    process.env.DB_STATEMENT_TIMEOUT_MS = '0';
+    await expectThrowsContaining('DB_STATEMENT_TIMEOUT_MS');
   });
 
   // ── LOG_SAMPLE_RATE ──────────────────────────────────────────────────────────

@@ -338,11 +338,31 @@ impl SubscriptionContract {
     }
 
     /// Update the platform fee in basis points. Only the admin may call this.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The caller's address (must be the stored admin and must authorize).
+    /// * `platform_fee_bps` - New fee in basis points. Valid range: 0–10000.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::InvalidInput`] — `platform_fee_bps` exceeds 10000.
+    /// * [`Error::Unauthorized`] — Caller is not the stored admin.
     pub fn set_platform_fee_bps(env: Env, admin: Address, platform_fee_bps: u32) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
         }
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
+        if platform_fee_bps > 10000 {
+            return Err(Error::InvalidInput);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
         admin.require_auth();
         if admin != stored_admin {
             return Err(Error::Unauthorized);
@@ -350,8 +370,18 @@ impl SubscriptionContract {
         env.storage()
             .instance()
             .set(&DataKey::PlatformFeeBps, &platform_fee_bps);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("fee_upd"),), (platform_fee_bps,));
         bump_instance(&env);
         Ok(())
+    }
+
+    /// Return the current platform fee in basis points.
+    pub fn get_platform_fee_bps(env: Env) -> Result<u32, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::PlatformFeeBps)
+            .ok_or(Error::NotInitialized)
     }
 
     // ── Pause / Unpause ────────────────────────────────────────────────────
@@ -739,6 +769,17 @@ mod tests {
         client.set_platform_fee_bps(&admin, &250u32);
         let fee = client.get_contact_fee();
         assert!(fee > 0);
+    }
+
+    #[test]
+    fn set_platform_fee_bps_fails_when_not_initialized() {
+        let env = Env::default();
+        let (client, admin, _token) = setup(&env);
+
+        assert_eq!(
+            client.try_set_platform_fee_bps(&admin, &250u32),
+            Err(Ok(Error::NotInitialized))
+        );
     }
 
     #[test]

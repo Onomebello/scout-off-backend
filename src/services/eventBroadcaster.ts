@@ -1,6 +1,8 @@
 import { EventEmitter } from 'events';
 import { ContractEventType } from '../types';
 import { logger } from '../utils/logger';
+import { getRedisSubscriberClient, publishSseEvent, subscribeSseEvents } from './redis';
+import config from '../config';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -32,6 +34,8 @@ export interface SseFilterCriteria {
  */
 export interface SseSubscriber {
   wallet: string;
+  /** Cuid2 player identity associated with this authenticated wallet, if any. */
+  playerId?: string;
   /** Optional server-side filter criteria for this connection. */
   filter?: SseFilterCriteria;
   send: (event: BroadcastEvent) => void;
@@ -42,22 +46,18 @@ export interface SseSubscriber {
 // Determines whether a broadcast event is relevant to a given wallet.
 // Rules (no cross-tenant leakage):
 //
-//   milestone_approved  → relevant when payload.player_id matches a player's own
-//                         wallet OR when the player_id column of the players table
-//                         is owned by that wallet. Because the indexer does NOT
-//                         carry a wallet field on milestone events we match on
-//                         player_id === wallet as a convention used throughout the
-//                         codebase, and also broadcast to any subscriber whose
-//                         wallet matches the scout_wallet / wallet field present
-//                         in the payload.
+//   milestone_approved  → relevant when payload.player_id matches the
+//                         subscriber's associated player ID, or a wallet field
+//                         in the payload matches the subscriber wallet.
 //
 //   scout_subscribed    → relevant when payload.scout (scout wallet) matches.
 //   contact_unlocked    → relevant when payload.scout (scout wallet) matches.
 //   trial_offer_logged  → relevant when payload.scout matches (scout) or
-//                         payload.player_id matches (player).
-//   player_registered   → relevant when payload.wallet matches.
-//   milestone_submitted → relevant when payload.player_id matches or
-//                         payload.validator matches.
+//                         payload.player_id matches the subscriber's player ID.
+//   player_registered   → relevant when payload.wallet matches or the player ID
+//                         matches the subscriber's player ID.
+//   milestone_submitted → relevant when payload.player_id matches the
+//                         subscriber's player ID or payload.validator matches.
 //   fees_withdrawn      → relevant when payload.recipient matches (admin).
 //
 // In practice clients only need milestone_approved, scout_subscribed, and
@@ -67,6 +67,7 @@ export interface SseSubscriber {
 export function isEventRelevantToWallet(
   event: BroadcastEvent,
   wallet: string,
+  playerId?: string,
 ): boolean {
   const p = event.payload;
 
@@ -74,7 +75,7 @@ export function isEventRelevantToWallet(
     case 'milestone_approved':
       // Broadcast to the player who owns the milestone and to scouts watching.
       return (
-        p.player_id === wallet ||
+        (playerId !== undefined && p.player_id === playerId) ||
         p.wallet === wallet ||
         p.scout === wallet
       );
@@ -86,28 +87,30 @@ export function isEventRelevantToWallet(
       return p.scout === wallet || p.wallet === wallet;
 
     case 'trial_offer_logged':
-      return p.scout === wallet || p.player_id === wallet;
+      return p.scout === wallet || (playerId !== undefined && p.player_id === playerId);
 
     case 'trial_offer_accepted':
     case 'trial_offer_rejected':
       // Notify the scout who made the offer and the player who responded.
-      return p.scout === wallet || p.player_id === wallet;
+      return p.scout === wallet || (playerId !== undefined && p.player_id === playerId);
 
     case 'player_registered':
-      return p.wallet === wallet || p.player_id === wallet;
+      return p.wallet === wallet || (playerId !== undefined && p.player_id === playerId);
 
     case 'milestone_submitted':
-      return p.player_id === wallet || p.validator === wallet;
+      return (playerId !== undefined && p.player_id === playerId) || p.validator === wallet;
 
     case 'fees_withdrawn':
       return p.recipient === wallet || p.wallet === wallet;
 
     case 'player_deactivated':
       // Notify the player themselves and any scout who unlocked their contact.
-      return p.player_id === wallet || p.wallet === wallet || p.scout_wallet === wallet;
+      return (playerId !== undefined && p.player_id === playerId) ||
+        p.wallet === wallet ||
+        p.scout_wallet === wallet;
 
     case 'player_reactivated':
-      return p.player_id === wallet || p.wallet === wallet;
+      return (playerId !== undefined && p.player_id === playerId) || p.wallet === wallet;
 
     default:
       return false;
@@ -150,10 +153,44 @@ export function isEventMatchingFilter(
   return true;
 }
 
+// ─── Metrics helpers ──────────────────────────────────────────────────────────
+
+let metrics = {
+  published: 0,
+  received: 0,
+  localBroadcasts: 0,
+  redisBroadcasts: 0,
+};
+
+/** Reset metrics — only for tests. */
+export function _resetMetrics(): void {
+  metrics = { published: 0, received: 0, localBroadcasts: 0, redisBroadcasts: 0 };
+}
+
+/** Return current metrics. */
+export function _getMetrics(): typeof metrics {
+  return { ...metrics };
+}
+
+// ─── Instance identification ──────────────────────────────────────────────────
+
+/**
+ * Unique ID for this process instance.
+ * Used to avoid echoing back our own Redis publishes.
+ */
+const INSTANCE_ID = `${config.redisUrl ? 'redis:' : 'local:'}${Math.random().toString(36).slice(2, 10)}`;
+
 // ─── EventBroadcaster ────────────────────────────────────────────────────────
 
 /**
- * Singleton in-process pub/sub bus for SSE.
+ * Singleton in-process pub/sub bus for SSE with Redis cross-instance
+ * message transport.
+ *
+ * - When Redis is configured, each broadcast is published to Redis (PUBLISH)
+ *   and each instance subscribes (SUBSCRIBE) to events from other instances.
+ * - Events from the same origin are skipped to avoid double delivery.
+ * - When Redis is NOT configured, the behavior equals the original single-instance
+ *   mode: only local broadcasts to in-process subscribers.
  *
  * The indexer calls `broadcast(event)` after persisting each batch of events.
  * The SSE route handler calls `subscribe(subscriber)` on connection and
@@ -170,6 +207,9 @@ export class EventBroadcaster extends EventEmitter {
   /** Active subscriber list — used for connection-count metrics. */
   private _subscribers: Set<SseSubscriber> = new Set();
 
+  /** Optional Redis unsubscribe function if Redis is configured. */
+  private _redisUnsubscribe?: () => void;
+
   private constructor() {
     super();
     // Raise the default max-listeners cap: each SSE connection adds one
@@ -180,7 +220,9 @@ export class EventBroadcaster extends EventEmitter {
   /** Return (or lazily create) the process-wide singleton. */
   static getInstance(): EventBroadcaster {
     if (!EventBroadcaster._instance) {
-      EventBroadcaster._instance = new EventBroadcaster();
+      const instance = new EventBroadcaster();
+      instance._setupRedis();
+      EventBroadcaster._instance = instance;
     }
     return EventBroadcaster._instance;
   }
@@ -201,6 +243,52 @@ export class EventBroadcaster extends EventEmitter {
     return this._subscribers.size;
   }
 
+  /** Number of currently connected subscribers authenticated as this wallet. */
+  getSubscriberCountForWallet(wallet: string): number {
+    let count = 0;
+    for (const subscriber of this._subscribers) {
+      if (subscriber.wallet === wallet) count += 1;
+    }
+    return count;
+  }
+
+  /**
+   * Set up Redis pub/sub if configured.
+   * Reads from the singleton instance to avoid circular dependency.
+   */
+  private _setupRedis(): void {
+    if (!config.redisUrl) {
+      logger.info('[eventBroadcaster] Redis not configured; using in-process-only mode');
+      return;
+    }
+
+    const subscriber = getRedisSubscriberClient();
+    if (!subscriber) {
+      logger.warn('[eventBroadcaster] Redis subscriber unavailable; using in-process-only mode');
+      return;
+    }
+
+    // Subscribe to SSE events from other instances
+    this._redisUnsubscribe = subscribeSseEvents((data: unknown) => {
+      const msg = data as { type: string; payload: Record<string, unknown>; origin: string };
+      metrics.received++;
+      
+      // Skip events from our own origin (avoid echo)
+      if (msg.origin === INSTANCE_ID) {
+        return;
+      }
+      
+      // Local broadcast to subscribers
+      metrics.localBroadcasts++;
+      this.emit(EventBroadcaster.CHANNEL, {
+        type: msg.type as ContractEventType,
+        payload: msg.payload,
+      });
+    });
+
+    logger.info('[eventBroadcaster] Redis pub/sub enabled; subscribed to sse:events channel');
+  }
+
   /**
    * Register an SSE subscriber. The subscriber's `send` callback will be
    * invoked for every event that passes:
@@ -213,7 +301,7 @@ export class EventBroadcaster extends EventEmitter {
     const listener = (event: BroadcastEvent) => {
       try {
         if (
-          isEventRelevantToWallet(event, subscriber.wallet) &&
+          isEventRelevantToWallet(event, subscriber.wallet, subscriber.playerId) &&
           isEventMatchingFilter(event, subscriber.filter)
         ) {
           subscriber.send(event);
@@ -255,12 +343,46 @@ export class EventBroadcaster extends EventEmitter {
   /**
    * Emit an event to all relevant subscribers.
    * Called by the indexer after persisting a batch of events.
+   * 
+   * When Redis is configured, the event is also published to Redis so other
+   * instances can receive it. Events are deduped by origin to avoid double
+   * delivery when both a controller and the indexer emit the same logical event.
    */
   broadcast(event: BroadcastEvent): void {
     logger.debug(`[eventBroadcaster] broadcast type=${event.type} subscribers=${this._subscribers.size}`);
+    
+    const origin = INSTANCE_ID;
+    
+    // Publish to Redis if available
+    const redisPublished = publishSseEvent({
+      type: event.type,
+      payload: event.payload,
+      origin,
+    });
+    
+    if (redisPublished) {
+      metrics.published++;
+      metrics.redisBroadcasts++;
+    } else {
+      metrics.published++;
+    }
+    
+    // Local broadcast to in-process subscribers
     this.emit(EventBroadcaster.CHANNEL, event);
+  }
+  
+  /**
+   * Clean up Redis subscription on destroy.
+   */
+  _cleanup(): void {
+    if (this._redisUnsubscribe) {
+      this._redisUnsubscribe();
+      this._redisUnsubscribe = undefined;
+    }
   }
 }
 
 /** Convenience accessor for the singleton. */
+/** Convenience accessor for the singleton. */
 export const broadcaster = EventBroadcaster.getInstance();
+

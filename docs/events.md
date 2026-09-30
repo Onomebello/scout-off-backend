@@ -43,8 +43,9 @@ Response codes:
 | `200`  | Stream opened; frames start arriving                                    |
 | `400`  | Invalid `eventType` filter (`{ success: false, error, code: "VALIDATION_ERROR", validEventTypes }`) |
 | `401`  | Missing or invalid token (`{ success: false, error }`)                  |
-| `403`  | Wallet is blocklisted — stream access revoked                           |
-| `503`  | Connection limit reached (`SSE_MAX_CONNECTIONS`) — retry later          |
+| `403`  | Wallet is blocklisted — stream access revoked (`code: WALLET_BLOCKLISTED`) |
+| `429`  | Per-wallet stream limit reached (`SSE_MAX_CONNECTIONS_PER_WALLET`)       |
+| `503`  | Process-wide stream limit reached (`SSE_MAX_CONNECTIONS`) — `code: SSE_CAPACITY`; retry after the `Retry-After` header (seconds) |
 
 ## Connecting
 
@@ -78,10 +79,13 @@ es.onopen = () => console.log('stream open');
 es.onmessage = (e) => console.log('event:', e.data);
 ```
 
-On connect the server immediately sends an initial frame so the client knows
+On connect the server immediately sends a `retry:` frame (with small random jitter
+to avoid reconnect storms) alongside the `connected` event so the client knows
 the stream is live:
 
 ```
+retry: 5234
+
 event: connected
 data: {"wallet":"GABCDEF..."}
 
@@ -174,8 +178,9 @@ Other frames you may see:
 
 | Frame type     | When                                            | Payload                                   |
 | -------------- | ----------------------------------------------- | ----------------------------------------- |
+| `retry:`       | Once, immediately on connect                    | Integer milliseconds (e.g. `5234`); sets client reconnect delay |
 | `connected`    | Once, immediately after the stream opens        | `{ "wallet": "<your wallet>" }`           |
-| `session_ended`| The stream is being closed (see live auth below)| `{ "reason": "token_revoked" \| "wallet_blocklisted" }` |
+| `session_ended`| The stream is being closed (see live auth below)| `{ "reason": "token_revoked" \| "wallet_blocklisted" \| "token_expired" }` |
 | `: ping`       | Keep-alive comment every `SSE_KEEPALIVE_INTERVAL_MS` (default 15 s) | — (comment only, ignored by EventSource) |
 
 The `data` field is JSON; parse it with `JSON.parse(e.data)`.
@@ -211,3 +216,78 @@ The two filter layers compose with **AND** semantics:
 
 1. `isEventRelevantToWallet` — wallet isolation, always enforced.
 2. `isEventMatchingFilter` — the optional `eventType`
+2. `isEventMatchingFilter` — the optional `eventType` / `playerId` narrowing.
+
+A `playerId` filter matches if any payload field that carries a player identity
+(`player_id`, `wallet`, `scout`, `recipient`, `validator`) equals the value.
+With no filter at all, the client receives every event that passes the
+relevance check (wildcard behaviour).
+
+## Keep-alive and compression
+
+- **Keep-alive:** a `: ping` comment frame is written every
+  `SSE_KEEPALIVE_INTERVAL_MS` (default `15000` ms) so proxies and load balancers
+  don't time out idle connections. The comment is ignored by `EventSource`.
+- **Compression:** gzip/br compression is **disabled** for the SSE paths
+  (`/api/events/stream`, `/api/v1/events/stream`, `/api/v2/events/stream`) —
+  SSE responses are written incrementally and compression would buffer them.
+- **Connection limits:** `SSE_MAX_CONNECTIONS_PER_WALLET` caps concurrent
+  streams per wallet (default `5`; `0` = unlimited, exceeded limit returns
+  `429`). `SSE_MAX_CONNECTIONS` caps total process-wide streams (default `0` =
+  unlimited, exceeded limit returns `503`).
+
+## Reconnection and replay behaviour (known limitations)
+
+- **Reconnection delay (`retry:` hint):** On connect, the server sends a `retry: <ms>`
+  hint (configured by `SSE_RETRY_MS`, default `5000` ms, plus up to 20% random jitter per
+  connection). Standard SSE clients (including `EventSource`) honour this hint to avoid
+  synchronized reconnect storms across clients.
+- There is **no `id:` field in event frames and no `Last-Event-ID` replay**.
+  If the connection drops, the server does not buffer missed events and cannot
+  resume the stream from a client-supplied offset.
+- When a client reconnects it simply opens a **fresh stream from "now"** —
+  events indexed while the client was disconnected are not replayed.
+- Therefore a reconnecting client must rebuild any state it might have missed
+  from the REST API (e.g. `GET /api/players/:playerId/milestones`,
+  `GET /api/admin/events`, or the webhook archive) rather than relying on the
+  stream for backfill.
+
+## Live authorization enforcement
+
+Once a stream is open, authorization is re-checked continuously (issue #1019):
+
+- If the JWT is revoked (`POST /auth/logout` or admin token revocation), the
+  server sends a terminal `session_ended` frame with reason `token_revoked` and
+  closes the connection.
+- If the wallet is blocklisted, the same happens with reason
+  `wallet_blocklisted`.
+- When the access JWT expires, the stream emits `session_ended` with reason
+  `token_expired` and closes. Clients must reconnect with a fresh token.
+- Detection is immediate for revocations/blocklists processed in the same
+  process, and within `SSE_AUTH_SWEEP_INTERVAL_MS` (default 30 s) for changes
+  persisted by another backend instance. A blocklisted wallet also cannot open
+  a new connection (403).
+
+See [docs/auth.md § SSE live revocation & wallet blocklisting](auth.md#sse-live-revocation--wallet-blocklisting-1019)
+for the full model.
+
+## Related configuration
+
+| Variable                    | Default | Description                                             |
+| --------------------------- | ------- | ------------------------------------------------------- |
+| `SSE_RETRY_MS`              | `5000`  | Base reconnect delay hint sent in `retry:` frame (ms)   |
+| `SSE_KEEPALIVE_INTERVAL_MS` | `15000` | Interval between keep-alive `: ping` comments (ms)      |
+| `SSE_MAX_CONNECTIONS_PER_WALLET` | `5` | Max concurrent streams per wallet; `0` = unlimited       |
+| `SSE_MAX_CONNECTIONS`       | `0`     | Max concurrent streams; `0` = unlimited                 |
+| `SSE_AUTH_SWEEP_INTERVAL_MS`| `30000` | Cross-process auth sweep interval (ms)                  |
+
+## Troubleshooting
+
+| Symptom                                  | Likely cause / check                                                        |
+| ---------------------------------------- | --------------------------------------------------------------------------- |
+| `401` on connect                         | Missing/expired `Authorization: Bearer` header                              |
+| `403` on connect                         | Wallet is blocklisted                                                       |
+| `503` on connect                         | `SSE_MAX_CONNECTIONS` reached — raise it or check for leaked connections     |
+| Stream opens but no events arrive        | Filter too narrow, or the events simply aren't relevant to your wallet      |
+| Events missed after a reconnect          | Expected — there is no `Last-Event-ID` replay; re-fetch state from REST      |
+| Keep-alives stop and connection dies     | Proxy buffering — ensure `X-Accel-Buffering: no` is honoured (set by the backend) |
